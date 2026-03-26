@@ -285,6 +285,7 @@ class WeiboHotSearch:
             })
 
     def get_hot_search(self, limit=20):
+        """获取前20条微博热搜"""
         try:
             url = 'https://weibo.com/ajax/side/hotSearch'
             if not REQUESTS_AVAILABLE:
@@ -292,8 +293,18 @@ class WeiboHotSearch:
             resp = self.session.get(url, timeout=10, verify=False)
             data = resp.json()
             items = data.get('data', {}).get('realtime', [])
-            return [{'title': i.get('word', ''), 'hot_score': i.get('raw_hot', 0), 'source': '微博热搜'} 
-                    for i in items[:limit] if i.get('word')]
+            results = []
+            for i, item in enumerate(items[:limit]):
+                title = item.get('word', '').strip()
+                if title:
+                    results.append({
+                        'rank': i + 1,
+                        'title': title,
+                        'hot_score': item.get('raw_hot', 0),
+                        'category': item.get('category', ''),
+                        'source': '微博热搜'
+                    })
+            return results
         except Exception as e:
             print(f"  Weibo error: {e}")
             return []
@@ -392,6 +403,107 @@ def analyze_news(title, content=''):
     return result
 
 
+def analyze_weibo_batch(hot_items):
+    """
+    批量分析微博热搜，筛选出对股市有影响的内容
+    """
+    if not hot_items:
+        return []
+    
+    hot_list_text = "\n".join([f"{i+1}. {item['title']}" for i, item in enumerate(hot_items)])
+    
+    prompt = f"""你是一位专业的财经分析师。请分析以下微博热搜列表，找出对股市可能有影响的热搜。
+
+微博热搜列表（按热度排名）：
+{hot_list_text}
+
+请分析每个热搜是否对股市有影响，考虑以下因素：
+1. 是否涉及上市公司、行业政策、宏观经济
+2. 是否可能引发市场情绪波动
+3. 是否与技术趋势、消费热点相关（如AI、新能源、消费等）
+
+请返回JSON数组格式，只包含有影响的热搜：
+[
+  {{
+    "rank": 排名数字,
+    "title": "热搜标题",
+    "is_relevant": true,
+    "reason": "对股市影响的具体原因（50字以内）",
+    "industries": ["相关行业1", "行业2"],
+    "sentiment": "正面/负面/中性",
+    "stocks": ["可能受影响的股票代码1", "代码2"]
+  }}
+]
+
+如果当前热搜都不影响股市，返回空数组 []。
+只返回JSON，不要其他文字："""
+
+    result_text = call_deepseek_api(prompt, 1000)
+    
+    if not result_text:
+        print("  DeepSeek API调用失败")
+        return []
+    
+    try:
+        analysis_results = json.loads(result_text)
+    except:
+        match = re.search(r'\[.*\]', result_text, re.DOTALL)
+        if match:
+            try:
+                analysis_results = json.loads(match.group())
+            except:
+                return []
+        else:
+            return []
+    
+    if not analysis_results:
+        print("  分析结果：当前热搜均不影响股市")
+        return []
+    
+    relevant_items = []
+    for analysis in analysis_results:
+        if not analysis.get('is_relevant', False):
+            continue
+        
+        rank = analysis.get('rank', 0)
+        hot_item = None
+        for item in hot_items:
+            if item.get('rank') == rank:
+                hot_item = item
+                break
+        
+        if not hot_item:
+            continue
+        
+        summary_prompt = f"""请为以下热搜生成一个简短的财经摘要（60字以内）：
+热搜：{hot_item['title']}
+影响原因：{analysis.get('reason', '')}
+直接输出摘要："""
+        
+        summary = call_deepseek_api(summary_prompt, 100) or analysis.get('reason', '热门话题')
+        if len(summary) > 60:
+            summary = summary[:57] + "..."
+        
+        relevant_items.append({
+            'title': hot_item['title'],
+            'url': f"https://s.weibo.com/weibo?q={hot_item['title']}",
+            'source': '微博热搜',
+            'time': datetime.now().isoformat(),
+            'hot_score': hot_item.get('hot_score', 0),
+            'rank': rank,
+            'ai_summary': summary,
+            'sentiment': analysis.get('sentiment', '中性'),
+            'impact': analysis.get('reason', '热门话题')[:50],
+            'trend': f"热度排名 #{rank}",
+            'industries': analysis.get('industries', ['综合'])[:3],
+            'stocks': analysis.get('stocks', [])[:5],
+            'is_social': True
+        })
+    
+    print(f"  微博热搜分析完成：{len(hot_items)}条中筛选出{len(relevant_items)}条对股市有影响")
+    return relevant_items
+
+
 # ==================== 辅助函数 ====================
 def format_time(time_str):
     try:
@@ -469,45 +581,43 @@ def fetch_news_sync():
             except Exception as e:
                 print(f"    Error: {e}")
     
-    # 添加微博热搜
+    # 处理微博热搜 - 新逻辑：AI批量分析
     try:
+        print("  Fetching Weibo hot search...")
         weibo = WeiboHotSearch()
-        hot_items = weibo.get_hot_search(limit=30)
-        print(f"  Weibo hot search: {len(hot_items)} items")
+        hot_items = weibo.get_hot_search(limit=20)  # 获取前20条
+        print(f"  Weibo hot search: got {len(hot_items)} items")
         
-        added = 0
-        for item in hot_items:
-            if added >= 3:
-                break
-            title = item.get('title', '')
-            # 简单关键词匹配
-            if any(kw in title for kw in ALL_KEYWORDS[:20]):
-                cached = get_cached_analysis(title)
-                ai_result = cached if cached else analyze_news(title)
-                
+        if hot_items:
+            # 批量分析，筛选对股市有影响的热搜
+            weibo_results = analyze_weibo_batch(hot_items)
+            
+            for result in weibo_results:
                 combined.append({
-                    'title': title,
-                    'url': f"https://s.weibo.com/weibo?q={title}",
+                    'title': result['title'],
+                    'url': result['url'],
                     'source': '微博热搜',
-                    'time': datetime.now().isoformat(),
-                    'ai_summary': ai_result['summary'],
-                    'sentiment': ai_result['sentiment'],
-                    'impact': ai_result['impact'],
-                    'trend': ai_result['trend'],
-                    'industries': ai_result['industries'],
-                    'stocks': ai_result['stocks'],
+                    'time': result['time'],
+                    'ai_summary': result['ai_summary'],
+                    'sentiment': result['sentiment'],
+                    'impact': result['impact'],
+                    'trend': result['trend'],
+                    'industries': result['industries'],
+                    'stocks': result['stocks'],
                     'source_class': 'weibo',
-                    'time_display': f"热度 {item.get('hot_score', 0)}",
-                    'sentiment_class': get_sentiment_class(ai_result['sentiment']),
-                    'is_social': True
+                    'time_display': f"热度 {result['hot_score']}",
+                    'sentiment_class': get_sentiment_class(result['sentiment']),
+                    'is_social': True,
+                    'rank': result.get('rank')
                 })
-                added += 1
-                print(f"    Added weibo: {title[:40]}...")
+                print(f"    Added weibo: #{result.get('rank')} {result['title'][:40]}...")
     except Exception as e:
         print(f"  Weibo error: {e}")
+        import traceback
+        traceback.print_exc()
     
-    # 排序
-    combined.sort(key=lambda x: x['time'], reverse=True)
+    # 排序：财经新闻按时间，微博按排名
+    combined.sort(key=lambda x: (0 if not x['is_social'] else 1, x.get('rank', 99) if x['is_social'] else 0), reverse=False)
     
     print(f"  Total combined: {len(combined)} items")
     return combined[:30]  # 最多15条
@@ -543,6 +653,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         .header h1 { font-size: 2.5em; margin-bottom: 10px; text-shadow: 2px 2px 4px rgba(0,0,0,0.2); }
         .header .subtitle { font-size: 1.1em; opacity: 0.9; }
         .header .time { opacity: 0.8; font-size: 0.9em; margin-top: 5px; }
+        .section-title { color: white; font-size: 1.3em; margin: 30px 0 15px 0; padding-left: 10px; border-left: 4px solid #fff; }
         .news-grid { display: grid; gap: 20px; }
         .news-card { background: white; border-radius: 16px; padding: 24px; box-shadow: 0 10px 40px rgba(0,0,0,0.1); transition: transform 0.3s, box-shadow 0.3s; cursor: pointer; text-decoration: none; color: inherit; display: block; }
         .news-card:hover { transform: translateY(-5px); box-shadow: 0 15px 50px rgba(0,0,0,0.2); }
@@ -553,6 +664,11 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         .source-cls { background: #e8f5e9; color: #388e3c; }
         .source-weibo { background: #fff3e0; color: #e65100; }
 .source-hackernews { background: #ff6600; color: white; }
+        .rank-badge { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; font-size: 0.75em; font-weight: 700; margin-right: 8px; }
+        .rank-top3 { background: linear-gradient(135deg, #ff6b6b, #ee5a5a); color: white; }
+        .rank-other { background: #e0e0e0; color: #616161; }
+        .weibo-section { margin-top: 20px; }
+        .weibo-empty { text-align: center; color: white; padding: 30px; background: rgba(255,255,255,0.1); border-radius: 12px; margin: 20px 0; }
         .source-default { background: #f5f5f5; color: #616161; }
         .news-time { font-size: 0.8em; color: #9e9e9e; }
         .news-title { font-size: 1.2em; font-weight: 600; line-height: 1.5; color: #212121; margin-bottom: 16px; }
@@ -588,21 +704,23 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             <div class="subtitle">AI 智能分析</div>
             <div class="time">更新时间: {{ update_time }} | 共 {{ news_count }} 条</div>
         </div>
+        
+        {% if finance_news %}
+        <h2 class="section-title">📈 财经要闻</h2>
         <div class="news-grid">
-            {% for news in news_list %}
+            {% for news in finance_news %}
             <a href="{{ news.url }}" target="_blank" class="news-card">
                 <div class="card-header">
                     <span class="source-tag source-{{ news.source_class }}">{{ news.source }}</span>
                     <span class="news-time">{{ news.time_display }}</span>
-                    {% if news.is_social %}<span class="social-badge">热搜</span>{% endif %}
                 </div>
                 <div class="news-title">{{ news.title }}</div>
                 <div class="ai-summary">
-                    <div class="ai-summary-header">新闻摘要</div>
+                    <div class="ai-summary-header">📝 新闻摘要</div>
                     <div class="ai-summary-content">{{ news.ai_summary }}</div>
                 </div>
                 <div class="ai-analysis">
-                    <div class="ai-header">智能分析<span class="sentiment-tag sentiment-{{ news.sentiment_class }}">{{ news.sentiment }}</span></div>
+                    <div class="ai-header">🤖 AI 智能分析<span class="sentiment-tag sentiment-{{ news.sentiment_class }}">{{ news.sentiment }}</span></div>
                     <div class="analysis-content">
                         <div class="analysis-item"><span class="analysis-label">市场影响：</span>{{ news.impact }}</div>
                         <div class="analysis-item"><span class="analysis-label">投资方向：</span>{{ news.trend }}</div>
@@ -614,7 +732,54 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             </a>
             {% endfor %}
         </div>
-        {% if not news_list %}<div style="text-align:center;color:white;padding:40px;"><h2>加载中...</h2></div>{% endif %}
+        {% endif %}
+        
+        {% if weibo_news %}
+        <div class="weibo-section">
+            <h2 class="section-title">🔥 微博热搜 · 股市相关</h2>
+            <div class="news-grid">
+                {% for news in weibo_news %}
+                <a href="{{ news.url }}" target="_blank" class="news-card">
+                    <div class="card-header">
+                        <span class="source-tag source-weibo">
+                            <span class="rank-badge {{ 'rank-top3' if news.rank <= 3 else 'rank-other' }}">{{ news.rank }}</span>
+                            微博热搜
+                        </span>
+                        <span class="news-time">{{ news.time_display }}</span>
+                        <span class="social-badge">热搜</span>
+                    </div>
+                    <div class="news-title">{{ news.title }}</div>
+                    <div class="ai-summary">
+                        <div class="ai-summary-header">📝 热搜摘要</div>
+                        <div class="ai-summary-content">{{ news.ai_summary }}</div>
+                    </div>
+                    <div class="ai-analysis">
+                        <div class="ai-header">🤖 AI 智能分析<span class="sentiment-tag sentiment-{{ news.sentiment_class }}">{{ news.sentiment }}</span></div>
+                        <div class="analysis-content">
+                            <div class="analysis-item"><span class="analysis-label">市场影响：</span>{{ news.impact }}</div>
+                            <div class="analysis-item"><span class="analysis-label">热度排名：</span>第 {{ news.rank }} 名</div>
+                        </div>
+                        {% if news.industries %}<div class="industry-tags">{% for ind in news.industries %}<span class="industry-tag">{{ ind }}</span>{% endfor %}</div>{% endif %}
+                        {% if news.stocks %}<div class="stock-tags">{% for stock in news.stocks %}<span class="stock-tag">{{ stock }}</span>{% endfor %}</div>{% endif %}
+                    </div>
+                    <div class="card-footer"><span></span><span class="read-more">查看热搜 →</span></div>
+                </a>
+                {% endfor %}
+            </div>
+        </div>
+        {% else %}
+        <div class="weibo-section">
+            <h2 class="section-title">🔥 微博热搜 · 股市相关</h2>
+            <div class="weibo-empty">
+                <p>当前微博热搜暂无直接影响股市的内容</p>
+                <p style="font-size: 0.9em; margin-top: 10px; opacity: 0.8;">DeepSeek 已分析前20条热搜</p>
+            </div>
+        </div>
+        {% endif %}
+        
+        {% if not finance_news and not weibo_news %}
+        <div style="text-align:center;color:white;padding:40px;"><h2>加载中...</h2></div>
+        {% endif %}
     </div>
 </body>
 </html>'''
@@ -624,7 +789,13 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 @app.route('/')
 def index():
     news_list = get_cached_news()
-    return render_template_string(HTML_TEMPLATE, news_list=news_list, news_count=len(news_list), update_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    finance_news = [n for n in news_list if not n.get('is_social')]
+    weibo_news = [n for n in news_list if n.get('is_social')]
+    return render_template_string(HTML_TEMPLATE, 
+                                  finance_news=finance_news,
+                                  weibo_news=weibo_news,
+                                  news_count=len(news_list),
+                                  update_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
 
 @app.route('/api/news')
