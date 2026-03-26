@@ -1,0 +1,728 @@
+#!/usr/bin/env python3
+"""
+新闻展示页面服务 - 修复版 v4
+修复：东方财富、新浪财经、财联社抓取
+"""
+
+import os
+import sys
+import json
+import re
+import hashlib
+import threading
+import time
+from flask import Flask, render_template_string, jsonify
+from datetime import datetime, timedelta
+from html.parser import HTMLParser
+
+# 尝试导入 requests
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    import urllib.request
+    import ssl
+    REQUESTS_AVAILABLE = False
+
+app = Flask(__name__)
+
+# DeepSeek API 配置
+DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY', 'sk-afcf9e6fcc804a3080a167d3f63dab1b')
+DEEPSEEK_API_BASE = os.getenv('DEEPSEEK_API_BASE', 'https://api.deepseek.com')
+DEEPSEEK_MODEL = os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')
+
+# 缓存配置
+CACHE_DIR = '/opt/tushare-stock/.cache'
+CACHE_TTL_HOURS = 24
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# 全局缓存
+_global_news_cache = {'data': None, 'timestamp': None, 'lock': threading.Lock()}
+
+# 定时任务配置
+AUTO_REFRESH_INTERVAL_HOURS = 6  # 每6小时自动刷新
+_last_auto_refresh = None
+_auto_refresh_lock = threading.Lock()
+
+# 关键词库
+ALL_KEYWORDS = ['股市', 'A股', '港股', '美股', '大盘', '指数', '银行', '保险', '证券', '地产', '医药', '科技', '芯片', '半导体', '新能源', '光伏', '锂电池', '电动车', '人工智能', 'AI', '军工', '消费', '白酒', '上市公司', '财报', 'IPO', '央行', '美联储', '降准', '降息', '基金', '股票', '利好', '利空', '战争', '冲突', '军事', '地缘政治']
+
+# ==================== 缓存功能 ====================
+def get_cache_key(title):
+    return hashlib.md5(title.encode('utf-8')).hexdigest()
+
+def get_cached_analysis(title):
+    key = get_cache_key(title)
+    path = os.path.join(CACHE_DIR, f"{key}.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            cached = json.load(f)
+        cached_time = datetime.fromisoformat(cached['cached_at'])
+        if datetime.now() - cached_time > timedelta(hours=CACHE_TTL_HOURS):
+            os.remove(path)
+            return None
+        return cached['data']
+    except:
+        return None
+
+def set_cached_analysis(title, data):
+    key = get_cache_key(title)
+    path = os.path.join(CACHE_DIR, f"{key}.json")
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({'cached_at': datetime.now().isoformat(), 'data': data}, f, ensure_ascii=False)
+    except:
+        pass
+
+# ==================== 新闻抓取 ====================
+class FinNews:
+    def __init__(self):
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.0.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.0',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+        }
+        self.session = requests.Session() if REQUESTS_AVAILABLE else None
+        if self.session:
+            self.session.headers.update(self.headers)
+
+    def _fetch(self, url, timeout=15):
+        try:
+            if REQUESTS_AVAILABLE and self.session:
+                resp = self.session.get(url, timeout=timeout, verify=False)
+                resp.encoding = resp.apparent_encoding or 'utf-8'
+                return resp.text
+            else:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                req = urllib.request.Request(url, headers=self.headers)
+                with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+                    return r.read().decode('utf-8', errors='ignore')
+        except Exception as e:
+            print(f"  Fetch error: {url[:50]}... - {e}")
+            return ""
+
+    def get_eastmoney_news(self, limit=8):
+        """东方财富 - 直接爬页面"""
+        try:
+            # 东方财富要闻页面
+            url = 'https://finance.eastmoney.com/a/cywjh.html'
+            html = self._fetch(url, timeout=20)
+            if not html:
+                return []
+            
+            news_list = []
+            # 多种匹配模式
+            patterns = [
+                r'<a[^>]*href="(https?://finance\.eastmoney\.com/a/\d{8,}\.html)"[^>]*>\s*<[^>]*>([^<]{15,200})</',
+                r'href="(https?://finance\.eastmoney\.com/a/\d{8,}\.html)"[^>]*>([^<]{15,200})</a>',
+                r'<a[^>]*href="(https?://finance\.eastmoney\.com/a/\d{8,}\.html)"[^>]*title="([^"]{15,200})"',
+            ]
+            
+            seen = set()
+            for pattern in patterns:
+                matches = re.findall(pattern, html)
+                for link, title in matches:
+                    title = title.strip()
+                    if title and len(title) > 15 and title not in seen and not any(x in title for x in ['财经', '焦点', '股票', '行情', '数据', '新股']):
+                        seen.add(title)
+                        news_list.append({
+                            'title': title,
+                            'url': link if link.startswith('http') else f"https:{link}",
+                            'source': '东方财富',
+                            'time': datetime.now().isoformat()
+                        })
+                        if len(news_list) >= limit:
+                            break
+                if len(news_list) >= limit:
+                    break
+            
+            print(f"  Eastmoney: {len(news_list)} items")
+            return news_list
+        except Exception as e:
+            print(f"  Eastmoney error: {e}")
+            return []
+
+    def get_sina_finance(self, limit=5):
+        """新浪财经 - 使用API"""
+        try:
+            # 新浪财经滚动新闻API
+            url = f'https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2516&k=&num=30&r={int(time.time()*1000)}'
+            html = self._fetch(url, timeout=15)
+            
+            news_list = []
+            try:
+                data = json.loads(html)
+                items = data.get('result', {}).get('data', [])
+                for item in items[:limit*2]:
+                    title = item.get('title', '').strip()
+                    url = item.get('url', '')
+                    ctime = item.get('ctime', '')
+                    if title and url and len(title) > 5:
+                        news_list.append({
+                            'title': title,
+                            'url': url,
+                            'source': '新浪财经',
+                            'time': datetime.fromtimestamp(int(ctime)).isoformat() if ctime else datetime.now().isoformat()
+                        })
+                        if len(news_list) >= limit:
+                            break
+            except Exception as e:
+                print(f"  Sina JSON error: {e}")
+            
+            print(f"  Sina: {len(news_list)} items")
+            return news_list
+        except Exception as e:
+            print(f"  Sina error: {e}")
+            return []
+
+    def get_cls_news(self, limit=5):
+        """财联社 - 爬取页面HTML"""
+        try:
+            url = 'https://www.cls.cn/telegraph'
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'zh-CN,zh;q=0.9',
+            }
+            
+            if REQUESTS_AVAILABLE:
+                resp = requests.get(url, headers=headers, timeout=15, verify=False)
+                resp.encoding = 'utf-8'
+                html = resp.text
+            else:
+                html = self._fetch(url)
+            
+            news_list = []
+            
+            # 移除script和style
+            clean_html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL)
+            clean_html = re.sub(r'<style[^>]*>.*?</style>', '', clean_html, flags=re.DOTALL)
+            
+            # 提取时间
+            time_pattern = r'class="[^"]*telegraph-time-box[^"]*"[^>]*>(\d{2}:\d{2})</'
+            times = re.findall(time_pattern, clean_html)
+            
+            # 提取内容 - 查找长度适中的文本
+            text_pattern = r'>([^<]{40,300})<'
+            texts = re.findall(text_pattern, clean_html)
+            
+            # 关键词过滤
+            keywords = ['股', '市', '涨', '跌', '板', '元', '亿', '万', '公司', '发布', '公告', '业绩']
+            seen = set()
+            
+            for i, text in enumerate(texts):
+                text = text.strip()
+                # 过滤条件
+                if len(text) < 30 or len(text) > 200:
+                    continue
+                if text in seen:
+                    continue
+                # 必须包含财经关键词
+                if not any(kw in text for kw in keywords):
+                    continue
+                # 排除常见垃圾内容
+                if any(x in text for x in ['Copyright', '版权所有', '免责声明', '点击查看']):
+                    continue
+                    
+                seen.add(text)
+                time_str = times[i] if i < len(times) else ''
+                
+                news_list.append({
+                    'title': text[:80] + '...' if len(text) > 80 else text,
+                    'url': 'https://www.cls.cn/telegraph',
+                    'source': '财联社',
+                    'time': datetime.now().isoformat(),
+                    'summary': text
+                })
+                
+                if len(news_list) >= limit:
+                    break
+            
+            print(f"  CLS: {len(news_list)} items (found {len(texts)} texts, {len(times)} times)")
+            return news_list
+        except Exception as e:
+            print(f"  CLS error: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+    def get_all_news(self, limit=8):
+        """获取所有新闻"""
+        results = {}
+        
+        # 东方财富
+        em = self.get_eastmoney_news(limit)
+        if em:
+            results['eastmoney'] = em
+        
+        # 新浪财经
+        sina = self.get_sina_finance(limit)
+        if sina:
+            results['sina'] = sina
+        
+        # 财联社
+        cls = self.get_cls_news(limit)
+        if cls:
+            results['cls'] = cls
+        
+        return results
+
+
+class WeiboHotSearch:
+    """微博热搜"""
+    def __init__(self):
+        self.session = requests.Session() if REQUESTS_AVAILABLE else None
+        if self.session:
+            self.session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': 'https://weibo.com/'
+            })
+
+    def get_hot_search(self, limit=20):
+        try:
+            url = 'https://weibo.com/ajax/side/hotSearch'
+            if not REQUESTS_AVAILABLE:
+                return []
+            resp = self.session.get(url, timeout=10, verify=False)
+            data = resp.json()
+            items = data.get('data', {}).get('realtime', [])
+            return [{'title': i.get('word', ''), 'hot_score': i.get('raw_hot', 0), 'source': '微博热搜'} 
+                    for i in items[:limit] if i.get('word')]
+        except Exception as e:
+            print(f"  Weibo error: {e}")
+            return []
+
+
+# ==================== AI分析 ====================
+
+class HackerNews:
+    """Hacker News"""
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+
+    def get_news(self, limit=10):
+        try:
+            url = 'https://news.ycombinator.com/'
+            resp = self.session.get(url, timeout=15, verify=False)
+            html = resp.text
+            pattern = r'class="titleline"><a[^>]*>([^<]+)</a>'
+            matches = re.findall(pattern, html)
+            results = []
+            seen = set()
+            for title in matches:
+                title = title.strip()
+                if title and title not in seen and len(title) > 10:
+                    seen.add(title)
+                    results.append({'title': title, 'hot_score': len(matches) - len(seen), 'source': 'Hacker News', 'url': 'https://news.ycombinator.com/'})
+                    if len(results) >= limit:
+                        break
+            return results
+        except Exception as e:
+            print(f"  Hacker News error: {e}")
+            return []
+
+def call_deepseek_api(prompt, max_tokens=400):
+    if not DEEPSEEK_API_KEY:
+        return None
+    try:
+        url = f"{DEEPSEEK_API_BASE}/v1/chat/completions"
+        headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {DEEPSEEK_API_KEY}'}
+        data = {'model': DEEPSEEK_MODEL, 'messages': [{'role': 'user', 'content': prompt}], 'max_tokens': max_tokens, 'temperature': 0.7}
+        
+        if REQUESTS_AVAILABLE:
+            resp = requests.post(url, headers=headers, json=data, timeout=30, verify=False)
+            return resp.json()['choices'][0]['message']['content'].strip()
+        return None
+    except Exception as e:
+        print(f"  DeepSeek error: {e}")
+        return None
+
+
+def analyze_news(title, content=''):
+    """分析新闻，带缓存"""
+    cached = get_cached_analysis(title)
+    if cached:
+        return cached
+    
+    # 生成摘要
+    summary_prompt = f"""为以下新闻生成摘要（不超过80字）：
+标题：{title}
+内容：{content[:500]}
+直接输出摘要："""
+    
+    summary = call_deepseek_api(summary_prompt, 150) or "摘要生成中..."
+    if len(summary) > 80:
+        summary = summary[:77] + "..."
+    
+    # 生成分析
+    analysis_prompt = f"""分析以下新闻，返回JSON：
+标题：{title}
+摘要：{summary}
+返回：{{"industries":["行业1"],"sentiment":"正面/负面/中性","impact":"影响","trend":"趋势","stocks":[]}}
+只返回JSON："""
+    
+    result_text = call_deepseek_api(analysis_prompt, 300)
+    
+    try:
+        analysis = json.loads(result_text) if result_text else {}
+    except:
+        match = re.search(r'\{.*\}', result_text or '', re.DOTALL)
+        try:
+            analysis = json.loads(match.group()) if match else {}
+        except:
+            analysis = {}
+    
+    result = {
+        'summary': summary,
+        'industries': analysis.get('industries', ['综合'])[:3],
+        'sentiment': analysis.get('sentiment', '中性'),
+        'impact': (analysis.get('impact', '分析中...') or '分析中...')[:40],
+        'trend': (analysis.get('trend', '建议关注') or '建议关注')[:40],
+        'stocks': analysis.get('stocks', [])[:5]
+    }
+    
+    set_cached_analysis(title, result)
+    return result
+
+
+# ==================== 辅助函数 ====================
+def format_time(time_str):
+    try:
+        dt = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
+        now = datetime.now()
+        diff = now - dt.replace(tzinfo=None)
+        if diff.days == 0:
+            if diff.seconds < 3600:
+                m = diff.seconds // 60
+                return f'{m}分钟前' if m > 0 else '刚刚'
+            return f'{diff.seconds // 3600}小时前'
+        elif diff.days == 1:
+            return '昨天'
+        return dt.strftime('%m-%d')
+    except:
+        return time_str[:16] if time_str else ''
+
+
+def get_source_class(source):
+    mapping = {'东方财富': 'eastmoney', '新浪财经': 'sina', '财联社': 'cls', '微博热搜': 'weibo'}
+    return mapping.get(source, 'default')
+
+
+def get_sentiment_class(s):
+    return {'正面': 'positive', '负面': 'negative'}.get(s, 'neutral')
+
+
+# ==================== 新闻获取 ====================
+def fetch_news_sync():
+    """同步获取新闻"""
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Fetching news...")
+    
+    client = FinNews()
+    all_news = client.get_all_news(limit=6)
+    
+    print(f"  Sources available: {list(all_news.keys())}")
+    
+    combined = []
+    
+    # 优先从每个来源取新闻，确保多样性
+    for source_key in ['eastmoney', 'sina', 'cls']:
+        items = all_news.get(source_key, [])
+        print(f"  Processing {source_key}: {len(items)} items")
+        for item in items[:5]:  # 每个来源最多5条
+            try:
+                title = item.get('title', '')
+                if not title or len(title) < 10:
+                    continue
+                
+                # 检查缓存
+                cached = get_cached_analysis(title)
+                if cached:
+                    ai_result = cached
+                    print(f"    Cache hit: {title[:40]}...")
+                else:
+                    print(f"    Analyzing: {title[:40]}...")
+                    ai_result = analyze_news(title, item.get('summary', ''))
+                
+                combined.append({
+                    'title': title,
+                    'url': item.get('url', '#'),
+                    'source': item.get('source', source_key),
+                    'time': item.get('time', datetime.now().isoformat()),
+                    'ai_summary': ai_result['summary'],
+                    'sentiment': ai_result['sentiment'],
+                    'impact': ai_result['impact'],
+                    'trend': ai_result['trend'],
+                    'industries': ai_result['industries'],
+                    'stocks': ai_result['stocks'],
+                    'source_class': get_source_class(item.get('source', source_key)),
+                    'time_display': format_time(item.get('time', '')),
+                    'sentiment_class': get_sentiment_class(ai_result['sentiment']),
+                    'is_social': False
+                })
+            except Exception as e:
+                print(f"    Error: {e}")
+    
+    # 添加微博热搜
+    try:
+        weibo = WeiboHotSearch()
+        hot_items = weibo.get_hot_search(limit=30)
+        print(f"  Weibo hot search: {len(hot_items)} items")
+        
+        added = 0
+        for item in hot_items:
+            if added >= 3:
+                break
+            title = item.get('title', '')
+            # 简单关键词匹配
+            if any(kw in title for kw in ALL_KEYWORDS[:20]):
+                cached = get_cached_analysis(title)
+                ai_result = cached if cached else analyze_news(title)
+                
+                combined.append({
+                    'title': title,
+                    'url': f"https://s.weibo.com/weibo?q={title}",
+                    'source': '微博热搜',
+                    'time': datetime.now().isoformat(),
+                    'ai_summary': ai_result['summary'],
+                    'sentiment': ai_result['sentiment'],
+                    'impact': ai_result['impact'],
+                    'trend': ai_result['trend'],
+                    'industries': ai_result['industries'],
+                    'stocks': ai_result['stocks'],
+                    'source_class': 'weibo',
+                    'time_display': f"热度 {item.get('hot_score', 0)}",
+                    'sentiment_class': get_sentiment_class(ai_result['sentiment']),
+                    'is_social': True
+                })
+                added += 1
+                print(f"    Added weibo: {title[:40]}...")
+    except Exception as e:
+        print(f"  Weibo error: {e}")
+    
+    # 排序
+    combined.sort(key=lambda x: x['time'], reverse=True)
+    
+    print(f"  Total combined: {len(combined)} items")
+    return combined[:30]  # 最多15条
+
+
+def get_cached_news():
+    """获取缓存的新闻"""
+    global _global_news_cache
+    
+    with _global_news_cache['lock']:
+        if _global_news_cache['data'] and _global_news_cache['timestamp']:
+            if datetime.now() - _global_news_cache['timestamp'] < timedelta(hours=12):
+                return _global_news_cache['data']
+        
+        data = fetch_news_sync()
+        _global_news_cache['data'] = data
+        _global_news_cache['timestamp'] = datetime.now()
+        return data
+
+
+# ==================== HTML模板 ====================
+HTML_TEMPLATE = '''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>财经新闻 - AI智能分析</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; }
+        .header { text-align: center; margin-bottom: 30px; color: white; }
+        .header h1 { font-size: 2.5em; margin-bottom: 10px; text-shadow: 2px 2px 4px rgba(0,0,0,0.2); }
+        .header .subtitle { font-size: 1.1em; opacity: 0.9; }
+        .header .time { opacity: 0.8; font-size: 0.9em; margin-top: 5px; }
+        .news-grid { display: grid; gap: 20px; }
+        .news-card { background: white; border-radius: 16px; padding: 24px; box-shadow: 0 10px 40px rgba(0,0,0,0.1); transition: transform 0.3s, box-shadow 0.3s; cursor: pointer; text-decoration: none; color: inherit; display: block; }
+        .news-card:hover { transform: translateY(-5px); box-shadow: 0 15px 50px rgba(0,0,0,0.2); }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
+        .source-tag { display: inline-flex; align-items: center; padding: 4px 12px; border-radius: 20px; font-size: 0.75em; font-weight: 600; }
+        .source-eastmoney { background: #e3f2fd; color: #1976d2; }
+        .source-sina { background: #fce4ec; color: #c2185b; }
+        .source-cls { background: #e8f5e9; color: #388e3c; }
+        .source-weibo { background: #fff3e0; color: #e65100; }
+.source-hackernews { background: #ff6600; color: white; }
+        .source-default { background: #f5f5f5; color: #616161; }
+        .news-time { font-size: 0.8em; color: #9e9e9e; }
+        .news-title { font-size: 1.2em; font-weight: 600; line-height: 1.5; color: #212121; margin-bottom: 16px; }
+        .ai-summary { background: #f8f9fa; border-radius: 12px; padding: 16px; margin-bottom: 16px; border-left: 4px solid #28a745; }
+        .ai-summary-header { display: flex; align-items: center; margin-bottom: 8px; font-size: 0.85em; font-weight: 600; color: #28a745; }
+        .ai-summary-header::before { content: "📝"; margin-right: 6px; }
+        .ai-summary-content { font-size: 0.95em; color: #424242; line-height: 1.6; }
+        .ai-analysis { background: linear-gradient(135deg, #f5f7fa 0%, #e4e8ec 100%); border-radius: 12px; padding: 16px; border-left: 4px solid #667eea; }
+        .ai-header { display: flex; align-items: center; margin-bottom: 12px; font-size: 0.85em; font-weight: 600; color: #667eea; }
+        .ai-header::before { content: "🤖 AI"; margin-right: 6px; }
+        .sentiment-tag { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.75em; margin-left: 10px; font-weight: 500; }
+        .sentiment-positive { background: #e8f5e9; color: #2e7d32; }
+        .sentiment-negative { background: #ffebee; color: #c62828; }
+        .sentiment-neutral { background: #f5f5f5; color: #616161; }
+        .analysis-content { font-size: 0.9em; color: #424242; line-height: 1.6; }
+        .analysis-item { margin: 8px 0; padding-left: 16px; position: relative; }
+        .analysis-item::before { content: "•"; position: absolute; left: 0; color: #667eea; font-weight: bold; }
+        .analysis-label { font-weight: 600; color: #667eea; }
+        .industry-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+        .industry-tag { background: #667eea; color: white; padding: 4px 12px; border-radius: 15px; font-size: 0.8em; font-weight: 500; }
+        .stock-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+        .stock-tag { background: #ff9800; color: white; padding: 3px 10px; border-radius: 15px; font-size: 0.75em; font-weight: 500; }
+        .card-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; padding-top: 16px; border-top: 1px solid #f0f0f0; }
+        .read-more { color: #667eea; font-size: 0.9em; font-weight: 500; }
+        .social-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 10px; font-size: 0.7em; margin-left: 8px; font-weight: 500; background: #ff5722; color: white; }
+        @media (max-width: 600px) { body { padding: 10px; } .header h1 { font-size: 1.8em; } .news-card { padding: 18px; } .news-title { font-size: 1.05em; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📰 财经新闻</h1>
+            <div class="subtitle">AI 智能分析</div>
+            <div class="time">更新时间: {{ update_time }} | 共 {{ news_count }} 条</div>
+        </div>
+        <div class="news-grid">
+            {% for news in news_list %}
+            <a href="{{ news.url }}" target="_blank" class="news-card">
+                <div class="card-header">
+                    <span class="source-tag source-{{ news.source_class }}">{{ news.source }}</span>
+                    <span class="news-time">{{ news.time_display }}</span>
+                    {% if news.is_social %}<span class="social-badge">热搜</span>{% endif %}
+                </div>
+                <div class="news-title">{{ news.title }}</div>
+                <div class="ai-summary">
+                    <div class="ai-summary-header">新闻摘要</div>
+                    <div class="ai-summary-content">{{ news.ai_summary }}</div>
+                </div>
+                <div class="ai-analysis">
+                    <div class="ai-header">智能分析<span class="sentiment-tag sentiment-{{ news.sentiment_class }}">{{ news.sentiment }}</span></div>
+                    <div class="analysis-content">
+                        <div class="analysis-item"><span class="analysis-label">市场影响：</span>{{ news.impact }}</div>
+                        <div class="analysis-item"><span class="analysis-label">投资方向：</span>{{ news.trend }}</div>
+                    </div>
+                    {% if news.industries %}<div class="industry-tags">{% for ind in news.industries %}<span class="industry-tag">{{ ind }}</span>{% endfor %}</div>{% endif %}
+                    {% if news.stocks %}<div class="stock-tags">{% for stock in news.stocks %}<span class="stock-tag">{{ stock }}</span>{% endfor %}</div>{% endif %}
+                </div>
+                <div class="card-footer"><span></span><span class="read-more">阅读全文 →</span></div>
+            </a>
+            {% endfor %}
+        </div>
+        {% if not news_list %}<div style="text-align:center;color:white;padding:40px;"><h2>加载中...</h2></div>{% endif %}
+    </div>
+</body>
+</html>'''
+
+
+# ==================== Flask路由 ====================
+@app.route('/')
+def index():
+    news_list = get_cached_news()
+    return render_template_string(HTML_TEMPLATE, news_list=news_list, news_count=len(news_list), update_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+
+
+@app.route('/api/news')
+def api_news():
+    return jsonify({'success': True, 'count': len(get_cached_news()), 'data': get_cached_news()})
+
+
+@app.route('/api/cache/stats')
+def cache_stats():
+    try:
+        files = [f for f in os.listdir(CACHE_DIR) if f.endswith('.json')]
+        total_size = sum(os.path.getsize(os.path.join(CACHE_DIR, f)) for f in files)
+        return jsonify({'cache_count': len(files), 'cache_size_mb': round(total_size / 1024 / 1024, 2)})
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+
+@app.route('/health')
+def health():
+    global _last_auto_refresh
+    return jsonify({
+        'status': 'ok', 
+        'deepseek_configured': bool(DEEPSEEK_API_KEY),
+        'auto_refresh_interval_hours': AUTO_REFRESH_INTERVAL_HOURS,
+        'last_auto_refresh': _last_auto_refresh.isoformat() if _last_auto_refresh else None
+    })
+
+
+def auto_refresh_worker():
+    """后台定时刷新线程"""
+    global _global_news_cache, _last_auto_refresh, AUTO_REFRESH_INTERVAL_HOURS
+    
+    print(f"[AutoRefresh] Worker started, interval: {AUTO_REFRESH_INTERVAL_HOURS} hours")
+    
+    while True:
+        try:
+            now = datetime.now()
+            
+            # 检查是否需要刷新
+            need_refresh = False
+            with _auto_refresh_lock:
+                if _last_auto_refresh is None:
+                    need_refresh = True
+                else:
+                    time_since_last = now - _last_auto_refresh
+                    if time_since_last >= timedelta(hours=AUTO_REFRESH_INTERVAL_HOURS):
+                        need_refresh = True
+            
+            if need_refresh:
+                print(f"\n[AutoRefresh] Starting auto refresh at {now}")
+                try:
+                    # 执行新闻抓取
+                    data = fetch_news_sync()
+                    
+                    # 更新缓存
+                    with _global_news_cache['lock']:
+                        _global_news_cache['data'] = data
+                        _global_news_cache['timestamp'] = now
+                    
+                    with _auto_refresh_lock:
+                        _last_auto_refresh = now
+                    
+                    print(f"[AutoRefresh] Completed at {datetime.now()}, got {len(data)} items")
+                except Exception as e:
+                    print(f"[AutoRefresh] Error during refresh: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # 每分钟检查一次
+            time.sleep(60)
+            
+        except Exception as e:
+            print(f"[AutoRefresh] Worker error: {e}")
+            time.sleep(60)
+
+
+def start_auto_refresh():
+    """启动定时刷新线程"""
+    thread = threading.Thread(target=auto_refresh_worker, daemon=True)
+    thread.start()
+    print(f"[AutoRefresh] Thread started")
+
+
+if __name__ == '__main__':
+    print("Starting server...")
+    
+    # 首次加载数据
+    print("[Init] Loading initial data...")
+    initial_data = fetch_news_sync()
+    with _global_news_cache['lock']:
+        _global_news_cache['data'] = initial_data
+        _global_news_cache['timestamp'] = datetime.now()
+    
+    _last_auto_refresh = datetime.now()
+    print(f"[Init] Loaded {len(initial_data)} items")
+    
+    # 启动定时刷新线程
+    start_auto_refresh()
+    
+    # 启动Flask服务
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, threaded=True)
