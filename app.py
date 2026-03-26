@@ -32,7 +32,7 @@ DEEPSEEK_API_BASE = os.getenv('DEEPSEEK_API_BASE', 'https://api.deepseek.com')
 DEEPSEEK_MODEL = os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')
 
 # 缓存配置
-CACHE_DIR = '/opt/tushare-stock/.cache'
+CACHE_DIR = '/opt/finnews/.cache'
 CACHE_TTL_HOURS = 24
 os.makedirs(CACHE_DIR, exist_ok=True)
 
