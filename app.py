@@ -568,6 +568,49 @@ class WeiboHotSearch:
             print(f"  Weibo error: {e}")
             return []
 
+    def search_weibo(self, keyword, limit=10):
+        """搜索微博关键词"""
+        try:
+            # 使用微博搜索接口
+            import urllib.parse
+            encoded_keyword = urllib.parse.quote(keyword)
+            url = f'https://m.weibo.cn/api/container/getIndex?containerid=100103type%3D1%26q%3D{encoded_keyword}&page_type=searchall'
+            
+            if not REQUESTS_AVAILABLE:
+                return []
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15',
+                'Referer': 'https://m.weibo.cn/'
+            }
+            
+            resp = self.session.get(url, headers=headers, timeout=10, verify=False)
+            data = resp.json()
+            
+            cards = data.get('data', {}).get('cards', [])
+            results = []
+            
+            for card in cards[:limit]:
+                if 'card_group' in card:
+                    for item in card['card_group']:
+                        mblog = item.get('mblog', {})
+                        if mblog:
+                            text = re.sub(r'<[^>]+>', '', mblog.get('text', ''))
+                            if text and len(text) > 10:
+                                results.append({
+                                    'title': text[:100] + '...' if len(text) > 100 else text,
+                                    'url': f"https://m.weibo.cn/detail/{mblog.get('mid', '')}",
+                                    'source': '微博搜索',
+                                    'time': datetime.now().isoformat(),
+                                    'keyword': keyword
+                                })
+            
+            print(f"  Weibo search '{keyword}': {len(results)} items")
+            return results
+        except Exception as e:
+            print(f"  Weibo search error: {e}")
+            return []
+
 
 # ==================== AI分析 ====================
 
