@@ -907,7 +907,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     <div class="container">
         <div class="header">
             <h1>📰 财经新闻</h1>
-            <div class="subtitle">AI 智能分析</div>
+            <div class="subtitle">{{ subtitle }}</div>
             <div class="time">更新时间: {{ update_time }} | 共 {{ news_count }} 条</div>
         </div>
         
@@ -922,19 +922,19 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 </div>
                 <div class="news-title">{{ news.title }}</div>
                 <div class="ai-summary">
-                    <div class="ai-summary-header">📝 新闻摘要</div>
+                    <div class="ai-summary-header">📝 {{ summary }}</div>
                     <div class="ai-summary-content">{{ news.ai_summary }}</div>
                 </div>
                 <div class="ai-analysis">
-                    <div class="ai-header">🤖 AI 智能分析<span class="sentiment-tag sentiment-{{ news.sentiment_class }}">{{ news.sentiment }}</span></div>
+                    <div class="ai-header">🤖 {{ ai_analysis }}<span class="sentiment-tag sentiment-{{ news.sentiment_class }}">{{ news.sentiment }}</span></div>
                     <div class="analysis-content">
-                        <div class="analysis-item"><span class="analysis-label">市场影响：</span>{{ news.impact }}</div>
-                        <div class="analysis-item"><span class="analysis-label">投资方向：</span>{{ news.trend }}</div>
+                        <div class="analysis-item"><span class="analysis-label">{{ market_impact }}:</span>{{ news.impact }}</div>
+                        <div class="analysis-item"><span class="analysis-label">{{ investment_direction }}:</span>{{ news.trend }}</div>
                     </div>
                     {% if news.industries %}<div class="industry-tags">{% for ind in news.industries %}<span class="industry-tag">{{ ind }}</span>{% endfor %}</div>{% endif %}
                     {% if news.stocks %}<div class="stock-tags">{% for stock in news.stocks %}<span class="stock-tag">{{ stock }}</span>{% endfor %}</div>{% endif %}
                 </div>
-                <div class="card-footer"><span></span><span class="read-more">阅读全文 →</span></div>
+                <div class="card-footer"><span></span><span class="read-more">{{ read_more }} →</span></div>
             </a>
             {% endfor %}
         </div>
@@ -952,23 +952,23 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                             微博热搜
                         </span>
                         <span class="news-time">{{ news.time_display }}</span>
-                        <span class="social-badge">热搜</span>
+                        <span class="social-badge">{{ hot_search }}</span>
                     </div>
                     <div class="news-title">{{ news.title }}</div>
                     <div class="ai-summary">
-                        <div class="ai-summary-header">📝 热搜摘要</div>
+                        <div class="ai-summary-header">📝 {{ weibo_summary }}</div>
                         <div class="ai-summary-content">{{ news.ai_summary }}</div>
                     </div>
                     <div class="ai-analysis">
-                        <div class="ai-header">🤖 AI 智能分析<span class="sentiment-tag sentiment-{{ news.sentiment_class }}">{{ news.sentiment }}</span></div>
+                        <div class="ai-header">🤖 {{ ai_analysis }}<span class="sentiment-tag sentiment-{{ news.sentiment_class }}">{{ news.sentiment }}</span></div>
                         <div class="analysis-content">
-                            <div class="analysis-item"><span class="analysis-label">市场影响：</span>{{ news.impact }}</div>
-                            <div class="analysis-item"><span class="analysis-label">热度排名：</span>第 {{ news.rank }} 名</div>
+                            <div class="analysis-item"><span class="analysis-label">{{ market_impact }}:</span>{{ news.impact }}</div>
+                            <div class="analysis-item"><span class="analysis-label">{{ rank }}:</span>第 {{ news.rank }} 名</div>
                         </div>
                         {% if news.industries %}<div class="industry-tags">{% for ind in news.industries %}<span class="industry-tag">{{ ind }}</span>{% endfor %}</div>{% endif %}
                         {% if news.stocks %}<div class="stock-tags">{% for stock in news.stocks %}<span class="stock-tag">{{ stock }}</span>{% endfor %}</div>{% endif %}
                     </div>
-                    <div class="card-footer"><span></span><span class="read-more">查看热搜 →</span></div>
+                    <div class="card-footer"><span></span><span class="read-more">{{ view_hot }} →</span></div>
                 </a>
                 {% endfor %}
             </div>
@@ -977,14 +977,14 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         <div class="weibo-section">
             <h2 class="section-title">🔥 微博热搜 · 股市相关</h2>
             <div class="weibo-empty">
-                <p>当前微博热搜暂无直接影响股市的内容</p>
-                <p style="font-size: 0.9em; margin-top: 10px; opacity: 0.8;">DeepSeek 已分析前20条热搜</p>
+                <p>{{ weibo_empty }}</p>
+                <p style="font-size: 0.9em; margin-top: 10px; opacity: 0.8;">{{ weibo_analyzed }}</p>
             </div>
         </div>
         {% endif %}
         
         {% if not finance_news and not weibo_news %}
-        <div style="text-align:center;color:white;padding:40px;"><h2>加载中...</h2></div>
+        <div style="text-align:center;color:white;padding:40px;"><h2>{{ loading }}</h2></div>
         {% endif %}
     </div>
 </body>
