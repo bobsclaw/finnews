@@ -368,7 +368,18 @@ def analyze_news(title, content=''):
 内容：{content[:500]}
 直接输出摘要："""
     
-    summary = call_deepseek_api(summary_prompt, 150) or "摘要生成中..."
+    summary = call_deepseek_api(summary_prompt, 150)
+    if not summary:
+        # API 调用失败，返回默认值但不缓存
+        return {
+            'summary': '摘要生成中...',
+            'industries': ['综合'],
+            'sentiment': '中性',
+            'impact': '分析中...',
+            'trend': '建议关注',
+            'stocks': []
+        }
+    
     if len(summary) > 80:
         summary = summary[:77] + "..."
     
@@ -399,7 +410,10 @@ def analyze_news(title, content=''):
         'stocks': analysis.get('stocks', [])[:5]
     }
     
-    set_cached_analysis(title, result)
+    # 只有成功获取到摘要时才缓存
+    if summary and summary != '摘要生成中...':
+        set_cached_analysis(title, result)
+    
     return result
 
 
@@ -674,11 +688,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         .news-title { font-size: 1.2em; font-weight: 600; line-height: 1.5; color: #212121; margin-bottom: 16px; }
         .ai-summary { background: #f8f9fa; border-radius: 12px; padding: 16px; margin-bottom: 16px; border-left: 4px solid #28a745; }
         .ai-summary-header { display: flex; align-items: center; margin-bottom: 8px; font-size: 0.85em; font-weight: 600; color: #28a745; }
-        .ai-summary-header::before { content: "📝"; margin-right: 6px; }
         .ai-summary-content { font-size: 0.95em; color: #424242; line-height: 1.6; }
         .ai-analysis { background: linear-gradient(135deg, #f5f7fa 0%, #e4e8ec 100%); border-radius: 12px; padding: 16px; border-left: 4px solid #667eea; }
         .ai-header { display: flex; align-items: center; margin-bottom: 12px; font-size: 0.85em; font-weight: 600; color: #667eea; }
-        .ai-header::before { content: "🤖 AI"; margin-right: 6px; }
         .sentiment-tag { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.75em; margin-left: 10px; font-weight: 500; }
         .sentiment-positive { background: #e8f5e9; color: #2e7d32; }
         .sentiment-negative { background: #ffebee; color: #c62828; }
