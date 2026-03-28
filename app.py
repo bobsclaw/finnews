@@ -1202,10 +1202,18 @@ def api_v1_news():
                 filtered_news.append(news)
         
         # 如果缓存中没有找到足够的新闻，使用搜索引擎补充
-        if len(filtered_news) < 3 and companies:
-            print(f"[API] Cache miss for {companies}, searching online...")
+        search_terms = []
+        if companies:
+            search_terms.extend(companies)
+        if tickers:
+            # 将股票代码转换为搜索词（如 600519 -> 茅台）
+            for ticker in tickers:
+                search_terms.append(ticker)
+        
+        if len(filtered_news) < 3 and search_terms:
+            print(f"[API] Cache miss for {search_terms}, searching online...")
             searcher = NewsSearcher()
-            online_news = searcher.search_by_keywords(companies, limit=5)
+            online_news = searcher.search_by_keywords(search_terms, limit=5)
             
             # 对搜索到的新闻进行 AI 分析
             for news in online_news:
