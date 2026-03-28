@@ -949,11 +949,16 @@ def api_v1_news():
     if lang not in ['zh', 'en']:
         lang = 'zh'
     
-    # 从 body 解析 field 参数
+    # 从 body 解析参数
     fields = []
+    tickers = []
+    companies = []
+    
     if request.is_json:
-        body = request.get_json()
-        if body and 'field' in body:
+        body = request.get_json() or {}
+        
+        # 解析 field（行业）
+        if 'field' in body:
             field_data = body['field']
             if isinstance(field_data, list):
                 fields = field_data
@@ -962,6 +967,28 @@ def api_v1_news():
                     fields = json.loads(field_data)
                 except:
                     fields = []
+        
+        # 解析 ticker（股票代码）
+        if 'ticker' in body:
+            ticker_data = body['ticker']
+            if isinstance(ticker_data, list):
+                tickers = ticker_data
+            elif isinstance(ticker_data, str):
+                try:
+                    tickers = json.loads(ticker_data)
+                except:
+                    tickers = []
+        
+        # 解析 company（公司名称）
+        if 'company' in body:
+            company_data = body['company']
+            if isinstance(company_data, list):
+                companies = company_data
+            elif isinstance(company_data, str):
+                try:
+                    companies = json.loads(company_data)
+                except:
+                    companies = []
     
     # 3. 获取新闻数据
     news_list = get_cached_news()
