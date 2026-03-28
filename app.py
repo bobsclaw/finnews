@@ -11,7 +11,7 @@ import re
 import hashlib
 import threading
 import time
-from flask import Flask, render_template_string, jsonify
+from flask import Flask, render_template_string, jsonify, request
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
 
@@ -33,8 +33,10 @@ DEEPSEEK_MODEL = os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')
 
 # 缓存配置
 CACHE_DIR = '/opt/finnews/.cache'
+TRANSLATION_CACHE_DIR = '/opt/finnews/.cache/translations'
 CACHE_TTL_HOURS = 24
 os.makedirs(CACHE_DIR, exist_ok=True)
+os.makedirs(TRANSLATION_CACHE_DIR, exist_ok=True)
 
 # 全局缓存
 _global_news_cache = {'data': None, 'timestamp': None, 'lock': threading.Lock()}
@@ -46,6 +48,175 @@ _auto_refresh_lock = threading.Lock()
 
 # 关键词库
 ALL_KEYWORDS = ['股市', 'A股', '港股', '美股', '大盘', '指数', '银行', '保险', '证券', '地产', '医药', '科技', '芯片', '半导体', '新能源', '光伏', '锂电池', '电动车', '人工智能', 'AI', '军工', '消费', '白酒', '上市公司', '财报', 'IPO', '央行', '美联储', '降准', '降息', '基金', '股票', '利好', '利空', '战争', '冲突', '军事', '地缘政治']
+
+
+# ==================== 多语言支持 ====================
+TRANSLATIONS = {
+    'zh': {
+        'title': '财经新闻',
+        'subtitle': 'AI 智能分析',
+        'update_time': '更新时间',
+        'news_count': '共',
+        'count_suffix': '条',
+        'finance_news': '财经要闻',
+        'weibo_hot': '微博热搜 · 股市相关',
+        'weibo_empty': '当前微博热搜暂无直接影响股市的内容',
+        'weibo_analyzed': 'DeepSeek 已分析前20条热搜',
+        'summary': '新闻摘要',
+        'weibo_summary': '热搜摘要',
+        'ai_analysis': 'AI 智能分析',
+        'market_impact': '市场影响',
+        'investment_direction': '投资方向',
+        'rank': '热度排名',
+        'rank_suffix': '名',
+        'read_more': '阅读全文',
+        'view_hot': '查看热搜',
+        'loading': '加载中...',
+        'switch_lang': 'English',
+        'positive': '正面',
+        'negative': '负面',
+        'neutral': '中性',
+        'analyzing': '分析中...',
+        'follow': '建议关注',
+        'comprehensive': '综合',
+        'hot_search': '热搜',
+    },
+    'en': {
+        'title': 'Financial News',
+        'subtitle': 'AI Powered Analysis',
+        'update_time': 'Updated',
+        'news_count': '',
+        'count_suffix': 'articles',
+        'finance_news': 'Financial News',
+        'weibo_hot': 'Weibo Hot Search · Stock Related',
+        'weibo_empty': 'No stock-related content in current Weibo hot search',
+        'weibo_analyzed': 'DeepSeek analyzed top 20 hot searches',
+        'summary': 'Summary',
+        'weibo_summary': 'Hot Search Summary',
+        'ai_analysis': 'AI Analysis',
+        'market_impact': 'Market Impact',
+        'investment_direction': 'Investment Direction',
+        'rank': 'Rank',
+        'rank_suffix': '',
+        'read_more': 'Read More',
+        'view_hot': 'View Hot Search',
+        'loading': 'Loading...',
+        'switch_lang': '中文',
+        'positive': 'Positive',
+        'negative': 'Negative',
+        'neutral': 'Neutral',
+        'analyzing': 'Analyzing...',
+        'follow': 'Watch',
+        'comprehensive': 'General',
+        'hot_search': 'HOT',
+    }
+}
+
+def get_text(key, lang='zh'):
+    return TRANSLATIONS.get(lang, TRANSLATIONS['zh']).get(key, key)
+
+# ==================== 翻译缓存功能 ====================
+def get_translation_cache_key(text, lang):
+    return hashlib.md5(f"{text}:{lang}".encode('utf-8')).hexdigest()
+
+def get_cached_translation(text, lang):
+    if not text or lang == 'zh':
+        return None
+    key = get_translation_cache_key(text, lang)
+    path = os.path.join(TRANSLATION_CACHE_DIR, f"{key}.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            cached = json.load(f)
+        cached_time = datetime.fromisoformat(cached['cached_at'])
+        if datetime.now() - cached_time > timedelta(hours=CACHE_TTL_HOURS * 7):
+            os.remove(path)
+            return None
+        return cached['translation']
+    except:
+        return None
+
+def set_cached_translation(text, lang, translation):
+    if not text or not translation or lang == 'zh':
+        return
+    key = get_translation_cache_key(text, lang)
+    path = os.path.join(TRANSLATION_CACHE_DIR, f"{key}.json")
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({
+                'cached_at': datetime.now().isoformat(),
+                'original': text,
+                'translation': translation,
+                'lang': lang
+            }, f, ensure_ascii=False)
+    except:
+        pass
+
+def translate_text(text, target_lang='en'):
+    if not text or target_lang == 'zh':
+        return text
+    cached = get_cached_translation(text, target_lang)
+    if cached:
+        return cached
+    if not DEEPSEEK_API_KEY:
+        return text
+    try:
+        prompt = f"""请将以下中文翻译成英文，保持简洁专业：
+
+{text}
+
+直接输出英文翻译，不要添加任何解释："""
+        headers = {
+            'Authorization': f'Bearer {DEEPSEEK_API_KEY}',
+            'Content-Type': 'application/json'
+        }
+        data = {
+            'model': DEEPSEEK_MODEL,
+            'messages': [{'role': 'user', 'content': prompt}],
+            'max_tokens': 500,
+            'temperature': 0.3
+        }
+        resp = requests.post(
+            f'{DEEPSEEK_API_BASE}/chat/completions',
+            headers=headers,
+            json=data,
+            timeout=10
+        )
+        if resp.status_code == 200:
+            result = resp.json()
+            translation = result['choices'][0]['message']['content'].strip()
+            set_cached_translation(text, target_lang, translation)
+            return translation
+    except Exception as e:
+        print(f"[Translate] Error: {e}")
+    return text
+
+def translate_news_item(news, lang='en'):
+    if lang == 'zh':
+        return news
+    translated = news.copy()
+    if news.get('title'):
+        translated['title'] = translate_text(news['title'], lang)
+    if news.get('ai_summary') and news['ai_summary'] != '摘要生成中...':
+        translated['ai_summary'] = translate_text(news['ai_summary'], lang)
+    if news.get('impact') and news['impact'] != '分析中...':
+        translated['impact'] = translate_text(news['impact'], lang)
+    if news.get('trend') and news['trend'] != '建议关注':
+        translated['trend'] = translate_text(news['trend'], lang)
+    if news.get('industries'):
+        industry_map = {
+            '综合': 'General', '科技': 'Technology', '金融': 'Finance',
+            '医药': 'Healthcare', '消费': 'Consumer', '能源': 'Energy',
+            '地产': 'Real Estate', '军工': 'Defense', '汽车': 'Automotive',
+            '人工智能': 'AI', '芯片': 'Semiconductor', '新能源': 'New Energy',
+            '银行': 'Banking', '保险': 'Insurance', '证券': 'Securities',
+        }
+        translated['industries'] = [industry_map.get(ind, ind) for ind in news['industries']]
+    sentiment_map = {'正面': 'Positive', '负面': 'Negative', '中性': 'Neutral'}
+    if news.get('sentiment'):
+        translated['sentiment'] = sentiment_map.get(news['sentiment'], news['sentiment'])
+    return translated
 
 # ==================== 缓存功能 ====================
 def get_cache_key(title):
@@ -800,14 +971,49 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 # ==================== Flask路由 ====================
 @app.route('/')
 def index():
+    # 获取语言参数
+    lang = request.args.get('lang', 'zh')
+    if lang not in ['zh', 'en']:
+        lang = 'zh'
+    other_lang = 'en' if lang == 'zh' else 'zh'
+    
+    # 获取新闻数据
     news_list = get_cached_news()
+    
+    # 如果需要英文，翻译新闻内容
+    if lang == 'en':
+        news_list = [translate_news_item(n, 'en') for n in news_list]
+    
     finance_news = [n for n in news_list if not n.get('is_social')]
     weibo_news = [n for n in news_list if n.get('is_social')]
-    return render_template_string(HTML_TEMPLATE, 
+    
+    return render_template_string(HTML_TEMPLATE,
+                                  lang=lang,
+                                  other_lang=other_lang,
+                                  title=get_text('title', lang),
+                                  subtitle=get_text('subtitle', lang),
                                   finance_news=finance_news,
                                   weibo_news=weibo_news,
                                   news_count=len(news_list),
-                                  update_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                                  count_suffix=get_text('count_suffix', lang),
+                                  update_time=get_text('update_time', lang),
+                                  update_time_value=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                  switch_lang=get_text('switch_lang', lang),
+                                  finance_news_title=get_text('finance_news', lang),
+                                  weibo_hot_title=get_text('weibo_hot', lang),
+                                  weibo_empty=get_text('weibo_empty', lang),
+                                  weibo_analyzed=get_text('weibo_analyzed', lang),
+                                  summary=get_text('summary', lang),
+                                  weibo_summary=get_text('weibo_summary', lang),
+                                  ai_analysis=get_text('ai_analysis', lang),
+                                  market_impact=get_text('market_impact', lang),
+                                  investment_direction=get_text('investment_direction', lang),
+                                  rank=get_text('rank', lang),
+                                  rank_suffix=get_text('rank_suffix', lang),
+                                  read_more=get_text('read_more', lang),
+                                  view_hot=get_text('view_hot', lang),
+                                  loading=get_text('loading', lang),
+                                  hot_search=get_text('hot_search', lang))
 
 
 @app.route('/api/news')
