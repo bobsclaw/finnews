@@ -276,7 +276,17 @@ def translate_news_item(news, lang='en'):
             '玻璃': 'Glass', '陶瓷': 'Ceramics', '造纸': 'Paper',
             '印刷': 'Printing', '包装': 'Packaging', '金属制品': 'Metal Products',
         }
-        translated['industries'] = [industry_map.get(ind, ind) for ind in news['industries']]
+        translated_industries = []
+        for ind in news['industries']:
+            if ind in industry_map:
+                translated_industries.append(industry_map[ind])
+            elif lang == 'en':
+                # 对未映射的行业名称进行翻译
+                translated_ind = translate_text(ind, 'en')
+                translated_industries.append(translated_ind)
+            else:
+                translated_industries.append(ind)
+        translated['industries'] = translated_industries
     
     # 翻译情感标签
     sentiment_map = {'正面': 'Positive', '负面': 'Negative', '中性': 'Neutral'}
