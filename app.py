@@ -571,6 +571,130 @@ class WeiboHotSearch:
 
 # ==================== AI分析 ====================
 
+
+
+class NewsSearcher:
+    """新闻搜索引擎"""
+    def __init__(self):
+        self.session = requests.Session() if REQUESTS_AVAILABLE else None
+        if self.session:
+            self.session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+
+    def search_bing_news(self, keyword, limit=10):
+        """使用 Bing News RSS 搜索新闻"""
+        try:
+            # Bing News RSS API
+            url = f'https://www.bing.com/news/search?q={keyword}&format=rss'
+            
+            if not REQUESTS_AVAILABLE:
+                return []
+            
+            resp = self.session.get(url, timeout=15, verify=False)
+            resp.encoding = 'utf-8'
+            
+            # 解析 RSS
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(resp.content)
+            
+            # RSS 命名空间
+            ns = {'media': 'http://search.yahoo.com/mrss/'}
+            
+            results = []
+            for item in root.findall('.//item')[:limit]:
+                title = item.find('title')
+                link = item.find('link')
+                desc = item.find('description')
+                pub_date = item.find('pubDate')
+                
+                if title is not None and link is not None:
+                    title_text = re.sub(r'<[^>]+>', '', title.text or '')
+                    results.append({
+                        'title': title_text,
+                        'url': link.text,
+                        'source': 'Bing News',
+                        'time': pub_date.text if pub_date else datetime.now().isoformat(),
+                        'keyword': keyword
+                    })
+            
+            print(f"  Bing News '{keyword}': {len(results)} items")
+            return results
+        except Exception as e:
+            print(f"  Bing News error: {e}")
+            return []
+
+    def search_sogou_news(self, keyword, limit=10):
+        """使用搜狗搜索新闻"""
+        try:
+            url = f'https://news.sogou.com/news?query={keyword}'
+            
+            if not REQUESTS_AVAILABLE:
+                return []
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            }
+            
+            resp = self.session.get(url, headers=headers, timeout=15, verify=False)
+            resp.encoding = 'utf-8'
+            html = resp.text
+            
+            results = []
+            # 提取新闻标题和链接
+            pattern = r'<h3[^>]*>.*?<a[^>]*href="([^"]+)"[^>]*>([^<]+)</a>.*?</h3>'
+            matches = re.findall(pattern, html, re.DOTALL)
+            
+            for link, title in matches[:limit]:
+                title_clean = re.sub(r'<[^>]+>', '', title).strip()
+                if title_clean and len(title_clean) > 10:
+                    results.append({
+                        'title': title_clean,
+                        'url': link if link.startswith('http') else f'https://news.sogou.com{link}',
+                        'source': '搜狗新闻',
+                        'time': datetime.now().isoformat(),
+                        'keyword': keyword
+                    })
+            
+            print(f"  Sogou News '{keyword}': {len(results)} items")
+            return results
+        except Exception as e:
+            print(f"  Sogou News error: {e}")
+            return []
+
+    def search_by_keywords(self, keywords, limit=5):
+        """根据关键词搜索多个来源的新闻"""
+        all_news = []
+        
+        for keyword in keywords:
+            print(f"[Search] Searching for: {keyword}")
+            
+            # 微博搜索
+            weibo = WeiboHotSearch()
+            weibo_results = weibo.search_weibo(keyword, limit)
+            all_news.extend(weibo_results)
+            
+            # Bing 搜索
+            bing_results = self.search_bing_news(keyword, limit)
+            all_news.extend(bing_results)
+            
+            # 搜狗搜索
+            sogou_results = self.search_sogou_news(keyword, limit)
+            all_news.extend(sogou_results)
+        
+        # 去重
+        seen = set()
+        unique_news = []
+        for news in all_news:
+            key = news.get('title', '')[:50]
+            if key and key not in seen:
+                seen.add(key)
+                unique_news.append(news)
+        
+        return unique_news[:limit * len(keywords)]
+
+
 class HackerNews:
     """Hacker News"""
     def __init__(self):
@@ -994,7 +1118,15 @@ def api_v1_news():
     news_list = get_cached_news()
     
     # 4. 根据 fields/tickers/companies 过滤新闻
-    if fields or tickers or companies:
+    search_keywords = []
+    if fields:
+        search_keywords.extend(fields)
+    if tickers:
+        search_keywords.extend(tickers)
+    if companies:
+        search_keywords.extend(companies)
+    
+    if search_keywords:
         filtered_news = []
         for news in news_list:
             match = False
@@ -1025,6 +1157,33 @@ def api_v1_news():
             
             if match:
                 filtered_news.append(news)
+        
+        # 如果缓存中没有找到足够的新闻，使用搜索引擎补充
+        if len(filtered_news) < 3 and companies:
+            print(f"[API] Cache miss for {companies}, searching online...")
+            searcher = NewsSearcher()
+            online_news = searcher.search_by_keywords(companies, limit=5)
+            
+            # 对搜索到的新闻进行 AI 分析
+            for news in online_news:
+                analysis = analyze_news(news['title'])
+                filtered_news.append({
+                    'title': news['title'],
+                    'url': news['url'],
+                    'source': news['source'],
+                    'time': news['time'],
+                    'ai_summary': analysis['summary'],
+                    'sentiment': analysis['sentiment'],
+                    'impact': analysis['impact'],
+                    'trend': analysis['trend'],
+                    'industries': analysis['industries'],
+                    'stocks': analysis['stocks'],
+                    'source_class': 'default',
+                    'time_display': '刚刚',
+                    'sentiment_class': get_sentiment_class(analysis['sentiment']),
+                    'is_social': False
+                })
+        
         news_list = filtered_news
     
     # 5. 如果需要英文，翻译新闻
