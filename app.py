@@ -11,7 +11,7 @@ import re
 import hashlib
 import threading
 import time
-from flask import Flask, render_template_string, jsonify, request
+from flask import Flask, render_template_string, jsonify, request, make_response
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
 
@@ -924,6 +924,8 @@ def api_v1_news():
     """
     # 1. 认证检查
     api_secret = request.headers.get('API_SECRET', '')
+    print(f'[API Debug] Received: {repr(api_secret)}')
+    print(f'[API Debug] Expected: {repr(API_SECRET)}')
     if api_secret != API_SECRET:
         return jsonify({'error': 'Unauthorized', 'message': 'Invalid or missing API_SECRET'}), 401
     
