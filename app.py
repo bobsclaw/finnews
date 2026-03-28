@@ -232,6 +232,7 @@ def translate_news_item(news, lang='en'):
             '人工智能': 'AI', '芯片': 'Semiconductor', '半导体': 'Semiconductor',
             '新能源': 'New Energy',
             '银行': 'Banking', '保险': 'Insurance', '证券': 'Securities',
+            '相关板块（未具体指明）': 'Related Sectors',
             '锂电池': 'Lithium Battery', '锂电': 'Lithium Battery', '锂矿': 'Lithium Mining',
             '光伏': 'Solar PV', '电动车': 'EV',
             '有色金属': 'Non-ferrous Metals', '钢铁': 'Steel', '煤炭': 'Coal',
