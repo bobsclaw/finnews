@@ -31,6 +31,9 @@ DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
 DEEPSEEK_API_BASE = os.getenv('DEEPSEEK_API_BASE', 'https://api.deepseek.com')
 DEEPSEEK_MODEL = os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')
 
+# API 接口认证配置
+API_SECRET = os.getenv('API_SECRET', 'finnews-api-secret-2026')
+
 # 缓存配置
 CACHE_DIR = '/opt/finnews/.cache'
 TRANSLATION_CACHE_DIR = '/opt/finnews/.cache/translations'
@@ -901,6 +904,258 @@ def get_cached_news():
 
 
 # ==================== HTML模板 ====================
+
+
+# ==================== API 接口 ====================
+@app.route('/api/v1/news')
+def api_v1_news():
+    """
+    API接口：根据行业和语言获取新闻
+    
+    Headers:
+        API_SECRET: 认证密钥
+    
+    Query Params:
+        lang: 语言 (zh/en)，默认 zh
+        field: 查询字段，JSON数组字符串，如 ["科技", "AI"]
+    
+    Returns:
+        HTML格式的卡片页面
+    """
+    # 1. 认证检查
+    api_secret = request.headers.get('API_SECRET', '')
+    if api_secret != API_SECRET:
+        return jsonify({'error': 'Unauthorized', 'message': 'Invalid or missing API_SECRET'}), 401
+    
+    # 2. 参数解析
+    lang = request.args.get('lang', 'zh').lower()
+    if lang not in ['zh', 'en']:
+        lang = 'zh'
+    
+    # 解析 field 参数
+    fields_param = request.args.get('field', '[]')
+    try:
+        fields = json.loads(fields_param)
+        if not isinstance(fields, list):
+            fields = []
+    except:
+        fields = []
+    
+    # 3. 获取新闻数据
+    news_list = get_cached_news()
+    
+    # 4. 根据 fields 过滤新闻
+    if fields:
+        filtered_news = []
+        for news in news_list:
+            # 检查新闻是否匹配查询字段
+            match = False
+            news_text = f"{news.get('title', '')} {' '.join(news.get('industries', []))} {' '.join(news.get('stocks', []))}"
+            
+            for field in fields:
+                field_lower = field.lower()
+                # 匹配行业、股票代码、标题关键词
+                if (field in news.get('industries', []) or 
+                    field in news.get('stocks', []) or
+                    field_lower in news_text.lower()):
+                    match = True
+                    break
+            
+            if match:
+                filtered_news.append(news)
+        news_list = filtered_news
+    
+    # 5. 如果需要英文，翻译新闻
+    if lang == 'en':
+        news_list = [translate_news_item(n, 'en') for n in news_list]
+    
+    # 6. 分离财经新闻和微博热搜
+    finance_news = [n for n in news_list if not n.get('is_social')]
+    weibo_news = [n for n in news_list if n.get('is_social')]
+    
+    # 7. 生成 HTML 响应
+    html_template = API_HTML_TEMPLATE
+    
+    # 渲染模板
+    html = render_template_string(
+        html_template,
+        lang=lang,
+        title=get_text('title', lang),
+        subtitle=get_text('subtitle', lang),
+        finance_news=finance_news,
+        weibo_news=weibo_news,
+        news_count=len(news_list),
+        count_suffix=get_text('count_suffix', lang),
+        update_time=get_text('update_time', lang),
+        update_time_value=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        finance_news_title=get_text('finance_news', lang),
+        weibo_hot_title=get_text('weibo_hot', lang),
+        weibo_empty=get_text('weibo_empty', lang),
+        weibo_analyzed=get_text('weibo_analyzed', lang),
+        summary=get_text('summary', lang),
+        weibo_summary=get_text('weibo_summary', lang),
+        ai_analysis=get_text('ai_analysis', lang),
+        market_impact=get_text('market_impact', lang),
+        investment_direction=get_text('investment_direction', lang),
+        rank=get_text('rank', lang),
+        rank_suffix=get_text('rank_suffix', lang),
+        read_more=get_text('read_more', lang),
+        view_hot=get_text('view_hot', lang),
+        loading=get_text('loading', lang),
+        hot_search=get_text('hot_search', lang),
+        query_fields=', '.join(fields) if fields else 'All'
+    )
+    
+    # 返回 HTML
+    response = make_response(html)
+    response.headers['Content-Type'] = 'text/html; charset=utf-8'
+    return response
+
+
+API_HTML_TEMPLATE = '''<!DOCTYPE html>
+<html lang="{{ lang }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} - {{ subtitle }}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; }
+        .header { text-align: center; margin-bottom: 30px; color: white; position: relative; }
+        .header h1 { font-size: 2.5em; margin-bottom: 10px; text-shadow: 2px 2px 4px rgba(0,0,0,0.2); }
+        .header .subtitle { font-size: 1.1em; opacity: 0.9; }
+        .header .time { opacity: 0.8; font-size: 0.9em; margin-top: 5px; }
+        .query-info { background: rgba(255,255,255,0.2); border-radius: 12px; padding: 12px 20px; margin-top: 15px; display: inline-block; }
+        .query-info span { font-size: 0.9em; opacity: 0.9; }
+        .section-title { color: white; font-size: 1.3em; margin: 30px 0 15px 0; padding-left: 10px; border-left: 4px solid #fff; }
+        .news-grid { display: grid; gap: 20px; }
+        .news-card { background: white; border-radius: 16px; padding: 24px; box-shadow: 0 10px 40px rgba(0,0,0,0.1); transition: transform 0.3s, box-shadow 0.3s; cursor: pointer; text-decoration: none; color: inherit; display: block; }
+        .news-card:hover { transform: translateY(-5px); box-shadow: 0 15px 50px rgba(0,0,0,0.2); }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
+        .source-tag { display: inline-flex; align-items: center; padding: 4px 12px; border-radius: 20px; font-size: 0.75em; font-weight: 600; }
+        .source-eastmoney { background: #e3f2fd; color: #1976d2; }
+        .source-sina { background: #fce4ec; color: #c2185b; }
+        .source-cls { background: #e8f5e9; color: #388e3c; }
+        .source-weibo { background: #fff3e0; color: #e65100; }
+        .rank-badge { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; font-size: 0.75em; font-weight: 700; margin-right: 8px; }
+        .rank-top3 { background: linear-gradient(135deg, #ff6b6b, #ee5a5a); color: white; }
+        .rank-other { background: #e0e0e0; color: #616161; }
+        .weibo-section { margin-top: 20px; }
+        .weibo-empty { text-align: center; color: white; padding: 30px; background: rgba(255,255,255,0.1); border-radius: 12px; margin: 20px 0; }
+        .news-time { font-size: 0.8em; color: #9e9e9e; }
+        .news-title { font-size: 1.2em; font-weight: 600; line-height: 1.5; color: #212121; margin-bottom: 16px; }
+        .ai-summary { background: #f8f9fa; border-radius: 12px; padding: 16px; margin-bottom: 16px; border-left: 4px solid #28a745; }
+        .ai-summary-header { display: flex; align-items: center; margin-bottom: 8px; font-size: 0.85em; font-weight: 600; color: #28a745; }
+        .ai-summary-content { font-size: 0.95em; color: #424242; line-height: 1.6; }
+        .ai-analysis { background: linear-gradient(135deg, #f5f7fa 0%, #e4e8ec 100%); border-radius: 12px; padding: 16px; border-left: 4px solid #667eea; }
+        .ai-header { display: flex; align-items: center; margin-bottom: 12px; font-size: 0.85em; font-weight: 600; color: #667eea; }
+        .sentiment-tag { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.75em; margin-left: 10px; font-weight: 500; }
+        .sentiment-positive { background: #e8f5e9; color: #2e7d32; }
+        .sentiment-negative { background: #ffebee; color: #c62828; }
+        .sentiment-neutral { background: #f5f5f5; color: #616161; }
+        .analysis-content { font-size: 0.9em; color: #424242; line-height: 1.6; }
+        .analysis-item { margin: 8px 0; padding-left: 16px; position: relative; }
+        .analysis-item::before { content: "•"; position: absolute; left: 0; color: #667eea; font-weight: bold; }
+        .analysis-label { font-weight: 600; color: #667eea; }
+        .industry-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+        .industry-tag { background: #667eea; color: white; padding: 4px 12px; border-radius: 15px; font-size: 0.8em; font-weight: 500; }
+        .stock-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+        .stock-tag { background: #ff9800; color: white; padding: 3px 10px; border-radius: 15px; font-size: 0.75em; font-weight: 500; }
+        .card-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; padding-top: 16px; border-top: 1px solid #f0f0f0; }
+        .read-more { color: #667eea; font-size: 0.9em; font-weight: 500; }
+        .social-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 10px; font-size: 0.7em; margin-left: 8px; font-weight: 500; background: #ff5722; color: white; }
+        @media (max-width: 600px) { body { padding: 10px; } .header h1 { font-size: 1.8em; } .news-card { padding: 18px; } .news-title { font-size: 1.05em; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>{{ title }}</h1>
+            <div class="subtitle">{{ subtitle }}</div>
+            <div class="time">{{ update_time }}: {{ update_time_value }} | {{ news_count }} {{ count_suffix }}</div>
+            <div class="query-info"><span>Query: {{ query_fields }}</span></div>
+        </div>
+        
+        {% if finance_news %}
+        <h2 class="section-title">{{ finance_news_title }}</h2>
+        <div class="news-grid">
+            {% for news in finance_news %}
+            <a href="{{ news.url }}" target="_blank" class="news-card">
+                <div class="card-header">
+                    <span class="source-tag source-{{ news.source_class }}">{{ news.source }}</span>
+                    <span class="news-time">{{ news.time_display }}</span>
+                </div>
+                <div class="news-title">{{ news.title }}</div>
+                <div class="ai-summary">
+                    <div class="ai-summary-header">{{ summary }}</div>
+                    <div class="ai-summary-content">{{ news.ai_summary }}</div>
+                </div>
+                <div class="ai-analysis">
+                    <div class="ai-header">{{ ai_analysis }}<span class="sentiment-tag sentiment-{{ news.sentiment_class }}">{{ news.sentiment }}</span></div>
+                    <div class="analysis-content">
+                        <div class="analysis-item"><span class="analysis-label">{{ market_impact }}:</span> {{ news.impact }}</div>
+                        <div class="analysis-item"><span class="analysis-label">{{ investment_direction }}:</span> {{ news.trend }}</div>
+                    </div>
+                    {% if news.industries %}<div class="industry-tags">{% for ind in news.industries %}<span class="industry-tag">{{ ind }}</span>{% endfor %}</div>{% endif %}
+                    {% if news.stocks %}<div class="stock-tags">{% for stock in news.stocks %}<span class="stock-tag">{{ stock }}</span>{% endfor %}</div>{% endif %}
+                </div>
+                <div class="card-footer"><span></span><span class="read-more">{{ read_more }} →</span></div>
+            </a>
+            {% endfor %}
+        </div>
+        {% endif %}
+        
+        {% if weibo_news %}
+        <div class="weibo-section">
+            <h2 class="section-title">{{ weibo_hot_title }}</h2>
+            <div class="news-grid">
+                {% for news in weibo_news %}
+                <a href="{{ news.url }}" target="_blank" class="news-card">
+                    <div class="card-header">
+                        <span class="source-tag source-weibo">
+                            <span class="rank-badge {{ 'rank-top3' if news.rank <= 3 else 'rank-other' }}">{{ news.rank }}</span>
+                            {{ news.source }}
+                        </span>
+                        <span class="news-time">{{ news.time_display }}</span>
+                        <span class="social-badge">{{ hot_search }}</span>
+                    </div>
+                    <div class="news-title">{{ news.title }}</div>
+                    <div class="ai-summary">
+                        <div class="ai-summary-header">{{ weibo_summary }}</div>
+                        <div class="ai-summary-content">{{ news.ai_summary }}</div>
+                    </div>
+                    <div class="ai-analysis">
+                        <div class="ai-header">{{ ai_analysis }}<span class="sentiment-tag sentiment-{{ news.sentiment_class }}">{{ news.sentiment }}</span></div>
+                        <div class="analysis-content">
+                            <div class="analysis-item"><span class="analysis-label">{{ market_impact }}:</span> {{ news.impact }}</div>
+                            <div class="analysis-item"><span class="analysis-label">{{ rank }}:</span> {{ news.rank }} {{ rank_suffix }}</div>
+                        </div>
+                        {% if news.industries %}<div class="industry-tags">{% for ind in news.industries %}<span class="industry-tag">{{ ind }}</span>{% endfor %}</div>{% endif %}
+                        {% if news.stocks %}<div class="stock-tags">{% for stock in news.stocks %}<span class="stock-tag">{{ stock }}</span>{% endfor %}</div>{% endif %}
+                    </div>
+                    <div class="card-footer"><span></span><span class="read-more">{{ view_hot }} →</span></div>
+                </a>
+                {% endfor %}
+            </div>
+        </div>
+        {% else %}
+        <div class="weibo-section">
+            <h2 class="section-title">{{ weibo_hot_title }}</h2>
+            <div class="weibo-empty">
+                <p>{{ weibo_empty }}</p>
+                <p style="font-size: 0.9em; margin-top: 10px; opacity: 0.8;">{{ weibo_analyzed }}</p>
+            </div>
+        </div>
+        {% endif %}
+        
+        {% if not finance_news and not weibo_news %}
+        <div style="text-align:center;color:white;padding:40px;"><h2>{{ loading }}</h2></div>
+        {% endif %}
+    </div>
+</body>
+</html>'''
+
 HTML_TEMPLATE = '''<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
