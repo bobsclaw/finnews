@@ -907,7 +907,7 @@ def get_cached_news():
 
 
 # ==================== API 接口 ====================
-@app.route('/api/v1/news')
+@app.route('/api/v1/news', methods=['GET', 'POST'])
 def api_v1_news():
     """
     API接口：根据行业和语言获取新闻
@@ -917,7 +917,9 @@ def api_v1_news():
     
     Query Params:
         lang: 语言 (zh/en)，默认 zh
-        field: 查询字段，JSON数组字符串，如 ["科技", "AI"]
+    
+    Body (JSON):
+        field: 数组，表示查询的行业、股票或公司名，如 ["科技", "AI"]
     
     Returns:
         HTML格式的卡片页面
@@ -934,14 +936,19 @@ def api_v1_news():
     if lang not in ['zh', 'en']:
         lang = 'zh'
     
-    # 解析 field 参数
-    fields_param = request.args.get('field', '[]')
-    try:
-        fields = json.loads(fields_param)
-        if not isinstance(fields, list):
-            fields = []
-    except:
-        fields = []
+    # 从 body 解析 field 参数
+    fields = []
+    if request.is_json:
+        body = request.get_json()
+        if body and 'field' in body:
+            field_data = body['field']
+            if isinstance(field_data, list):
+                fields = field_data
+            elif isinstance(field_data, str):
+                try:
+                    fields = json.loads(field_data)
+                except:
+                    fields = []
     
     # 3. 获取新闻数据
     news_list = get_cached_news()
