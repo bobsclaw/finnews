@@ -26,6 +26,14 @@ except ImportError:
 
 app = Flask(__name__)
 
+# 添加 CORS 支持
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type, API_SECRET, Api-Secret, api-secret')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    return response
+
 # DeepSeek API 配置
 DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
 DEEPSEEK_API_BASE = os.getenv('DEEPSEEK_API_BASE', 'https://api.deepseek.com')
@@ -924,10 +932,13 @@ def api_v1_news():
     Returns:
         HTML格式的卡片页面
     """
-    # 1. 认证检查
-    api_secret = request.headers.get('API_SECRET', '')
-    print(f'[API Debug] Received: {repr(api_secret)}')
-    print(f'[API Debug] Expected: {repr(API_SECRET)}')
+    # 1. 认证检查 - 支持多种请求头格式
+    api_secret = (
+        request.headers.get('API_SECRET', '') or 
+        request.headers.get('Api-Secret', '') or
+        request.headers.get('api-secret', '') or
+        request.args.get('api_secret', '')
+    )
     if api_secret != API_SECRET:
         return jsonify({'error': 'Unauthorized', 'message': 'Invalid or missing API_SECRET'}), 401
     
