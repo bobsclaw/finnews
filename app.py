@@ -196,14 +196,34 @@ def translate_news_item(news, lang='en'):
     if lang == 'zh':
         return news
     translated = news.copy()
+    
+    # 翻译标题
     if news.get('title'):
         translated['title'] = translate_text(news['title'], lang)
+    
+    # 翻译来源
+    source_map = {
+        '东方财富': 'Eastmoney',
+        '新浪财经': 'Sina Finance',
+        '财联社': 'CLS',
+        '微博热搜': 'Weibo Hot'
+    }
+    if news.get('source'):
+        translated['source'] = source_map.get(news['source'], news['source'])
+    
+    # 翻译AI摘要
     if news.get('ai_summary') and news['ai_summary'] != '摘要生成中...':
         translated['ai_summary'] = translate_text(news['ai_summary'], lang)
+    
+    # 翻译影响分析
     if news.get('impact') and news['impact'] != '分析中...':
         translated['impact'] = translate_text(news['impact'], lang)
+    
+    # 翻译趋势/投资方向
     if news.get('trend') and news['trend'] != '建议关注':
         translated['trend'] = translate_text(news['trend'], lang)
+    
+    # 翻译行业标签
     if news.get('industries'):
         industry_map = {
             '综合': 'General', '科技': 'Technology', '金融': 'Finance',
@@ -213,9 +233,12 @@ def translate_news_item(news, lang='en'):
             '银行': 'Banking', '保险': 'Insurance', '证券': 'Securities',
         }
         translated['industries'] = [industry_map.get(ind, ind) for ind in news['industries']]
+    
+    # 翻译情感标签
     sentiment_map = {'正面': 'Positive', '负面': 'Negative', '中性': 'Neutral'}
     if news.get('sentiment'):
         translated['sentiment'] = sentiment_map.get(news['sentiment'], news['sentiment'])
+    
     return translated
 
 # ==================== 缓存功能 ====================
