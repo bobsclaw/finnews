@@ -927,7 +927,9 @@ def api_v1_news():
         lang: 语言 (zh/en)，默认 zh
     
     Body (JSON):
-        field: 数组，表示查询的行业、股票或公司名，如 ["科技", "AI"]
+        field: 数组，表示查询的行业，如 ["科技", "AI"]
+        ticker: 数组，股票代码列表，如 ["600519", "000001"]
+        company: 数组，公司名称列表，如 ["茅台", "宁德时代"]
     
     Returns:
         HTML格式的卡片页面
@@ -964,22 +966,35 @@ def api_v1_news():
     # 3. 获取新闻数据
     news_list = get_cached_news()
     
-    # 4. 根据 fields 过滤新闻
-    if fields:
+    # 4. 根据 fields/tickers/companies 过滤新闻
+    if fields or tickers or companies:
         filtered_news = []
         for news in news_list:
-            # 检查新闻是否匹配查询字段
             match = False
-            news_text = f"{news.get('title', '')} {' '.join(news.get('industries', []))} {' '.join(news.get('stocks', []))}"
+            news_title = news.get('title', '').lower()
+            news_industries = news.get('industries', [])
+            news_stocks = news.get('stocks', [])
             
-            for field in fields:
-                field_lower = field.lower()
-                # 匹配行业、股票代码、标题关键词
-                if (field in news.get('industries', []) or 
-                    field in news.get('stocks', []) or
-                    field_lower in news_text.lower()):
-                    match = True
-                    break
+            # 检查 field（行业）匹配
+            if fields:
+                for field in fields:
+                    if field in news_industries or field.lower() in news_title:
+                        match = True
+                        break
+            
+            # 检查 ticker（股票代码）匹配
+            if not match and tickers:
+                for ticker in tickers:
+                    if ticker in news_stocks or ticker.lower() in news_title:
+                        match = True
+                        break
+            
+            # 检查 company（公司名称）匹配
+            if not match and companies:
+                for company in companies:
+                    if company.lower() in news_title:
+                        match = True
+                        break
             
             if match:
                 filtered_news.append(news)
