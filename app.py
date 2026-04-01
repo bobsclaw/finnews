@@ -26,11 +26,47 @@ except ImportError:
     REQUESTS_AVAILABLE = False
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024  # 2MB
+# ===== 速率限制装饰器 =====
+_rate_limit_store = {}
+_rate_limit_lock = None
+
+def rate_limit(max_requests=30, period=60):
+    """简单内存速率限制"""
+    def decorator(fn):
+        def wrapper(*args, **kwargs):
+            global _rate_limit_lock
+            import time as _t
+            if _rate_limit_lock is None:
+                import threading
+                _rate_limit_lock = threading.Lock()
+            ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+            now = _t.time()
+            with _rate_limit_lock:
+                if ip not in _rate_limit_store:
+                    _rate_limit_store[ip] = []
+                _rate_limit_store[ip] = [t for t in _rate_limit_store[ip] if now - t < period]
+                if len(_rate_limit_store[ip]) >= max_requests:
+                    return jsonify({'error': 'Rate limit exceeded'}), 429
+                _rate_limit_store[ip].append(now)
+            return fn(*args, **kwargs)
+        wrapper.__name__ = fn.__name__
+        return wrapper
+    return decorator
+
 
 # DeepSeek API 配置
 DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
 DEEPSEEK_API_BASE = os.getenv('DEEPSEEK_API_BASE', 'https://api.deepseek.com')
 DEEPSEEK_MODEL = os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')
+
+# API 认证
+API_SECRET = os.getenv('API_SECRET')
+if not API_SECRET:
+    import secrets as _sec
+    API_SECRET = _sec.token_urlsafe(32)
+    print(f'[SECURITY] Auto-generated API_SECRET: {API_SECRET}')
+    print('[SECURITY] Set env API_SECRET for persistence!')
 # ==================== 双语文本 ====================
 TEXT = {
     "zh": {
@@ -174,13 +210,13 @@ class FinNews:
     def _fetch(self, url, timeout=15):
         try:
             if REQUESTS_AVAILABLE and self.session:
-                resp = self.session.get(url, timeout=timeout, verify=False)
+                resp = self.session.get(url, timeout=timeout, verify=True)
                 resp.encoding = resp.apparent_encoding or 'utf-8'
                 return resp.text
             else:
                 ctx = ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
+                ctx.check_hostname = True
+                ctx.verify_mode = ssl.CERT_REQUIRED
                 req = urllib.request.Request(url, headers=self.headers)
                 with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
                     return r.read().decode('utf-8', errors='ignore')
@@ -273,7 +309,7 @@ class FinNews:
             }
             
             if REQUESTS_AVAILABLE:
-                resp = requests.get(url, headers=headers, timeout=15, verify=False)
+                resp = requests.get(url, headers=headers, timeout=15, verify=True)
                 resp.encoding = 'utf-8'
                 html = resp.text
             else:
@@ -371,7 +407,7 @@ class WeiboHotSearch:
             url = 'https://weibo.com/ajax/side/hotSearch'
             if not REQUESTS_AVAILABLE:
                 return []
-            resp = self.session.get(url, timeout=10, verify=False)
+            resp = self.session.get(url, timeout=10, verify=True)
             data = resp.json()
             items = data.get('data', {}).get('realtime', [])
             results = []
@@ -424,7 +460,7 @@ class RedditHotSearch:
         out, seen = [], set()
         for sub, lim in self.SUBREDDITS:
             try:
-                r = self.s.get(f"https://www.reddit.com/r/{sub}/.rss?limit={lim}", timeout=15, verify=False)
+                r = self.s.get(f"https://www.reddit.com/r/{sub}/.rss?limit={lim}", timeout=15, verify=True)
                 if r.status_code!=200: continue
                 for p in self._parse(r.text, sub):
                     if p["title"] not in seen and any(k in p["title"].lower() for k in self.KW):
@@ -444,7 +480,7 @@ class HackerNews:
     def get_news(self, limit=10):
         try:
             url = 'https://news.ycombinator.com/'
-            resp = self.session.get(url, timeout=15, verify=False)
+            resp = self.session.get(url, timeout=15, verify=True)
             html = resp.text
             pattern = r'class="titleline"><a[^>]*>([^<]+)</a>'
             matches = re.findall(pattern, html)
@@ -471,7 +507,7 @@ def call_deepseek_api(prompt, max_tokens=400):
         data = {'model': DEEPSEEK_MODEL, 'messages': [{'role': 'user', 'content': prompt}], 'max_tokens': max_tokens, 'temperature': 0.7}
         
         if REQUESTS_AVAILABLE:
-            resp = requests.post(url, headers=headers, json=data, timeout=30, verify=False)
+            resp = requests.post(url, headers=headers, json=data, timeout=30, verify=True)
             return resp.json()['choices'][0]['message']['content'].strip()
         return None
     except Exception as e:
@@ -905,6 +941,42 @@ def get_cached_news():
         return data
 
 
+
+# ===== 股票代码 ↔ 公司名称映射 =====
+TICKER_MAP = {
+    # 银行
+    '000001': '平安银行', '600000': '浦发银行', '600015': '华夏银行',
+    '600016': '民生银行', '600036': '招商银行', '601166': '兴业银行',
+    '600018': '上港集团', '601318': '中国平安', '601328': '交通银行',
+    '601988': '中国银行', '601939': '建设银行', '601288': '农业银行',
+    '601398': '工商银行', '002142': '宁波银行', '600919': '江苏银行',
+    '601818': '光大银行', '600928': '西安银行', '000758': '中色股份',
+    '000686': '东北证券',
+    # 新能源/汽车
+    '002594': '比亚迪', '300750': '宁德时代', '000858': '五粮液',
+    '600519': '贵州茅台', '000333': '美的集团', '603259': '药明康德',
+    # 科技
+    '688981': '中芯国际', '000063': '中兴通讯', '300782': '卓胜微',
+    '688126': '沪硅产业', '300124': '汇川技术', '002371': '北方华创',
+    # 互联网/海外
+    'TSLA': '特斯拉', 'AAPL': '苹果', 'NVDA': '英伟达',
+    'MSFT': '微软', 'AMZN': '亚马逊', 'META': 'Meta',
+    'GOOG': '谷歌', 'GOOGL': '谷歌', 'BABA': '阿里巴巴',
+}
+# 反向映射: 公司名 → 代码
+COMPANY_TO_TICKER = {v: k for k, v in TICKER_MAP.items()}
+
+def get_company_names(tickers):
+    """股票代码转公司名称"""
+    names = []
+    for t in tickers:
+        t_upper = t.upper()
+        if t_upper in TICKER_MAP:
+            names.append(TICKER_MAP[t_upper])
+        elif t in TICKER_MAP:
+            names.append(TICKER_MAP[t])
+    return names
+
 # ==================== HTML模板 ====================
 HTML_TEMPLATE = '''<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1089,16 +1161,171 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
 
 # ==================== Flask路由 ====================
-@app.route('/')
+
+def filter_news_by_keywords(news_list, filters):
+    """Filter news by keywords from POST body"""
+    if not filters:
+        return news_list
+    
+    keywords = []
+    keywords.extend(filters.get('field', []))
+    tickers = filters.get('ticker', [])
+    companies = filters.get('company', [])
+    keywords.extend(tickers)
+    keywords.extend(companies)
+    
+    # 股票代码 → 公司名称映射
+    company_from_ticker = get_company_names(tickers)
+    keywords.extend([c for c in company_from_ticker if c not in companies])
+    # 公司名称 → 股票代码映射
+    ticker_from_company = [COMPANY_TO_TICKER.get(c, '') for c in companies if c in COMPANY_TO_TICKER]
+    keywords.extend([t for t in ticker_from_company if t and t not in tickers])
+    
+    if not keywords:
+        return news_list
+    
+    filtered = []
+    for news in news_list:
+        title = (news.get('title') or '').lower()
+        ai_summary = (news.get('ai_summary') or '').lower()
+        industries = [str(x).lower() for x in news.get('industries', [])]
+        stocks = [str(x).lower() for x in news.get('stocks', [])]
+        
+        for kw in keywords:
+            kw_lower = kw.lower()
+            if (kw_lower in title or kw_lower in ai_summary or
+                any(kw_lower in x for x in industries) or
+                any(kw_lower in x for x in stocks)):
+                filtered.append(news)
+                break
+    
+    # If too few results, search with Google News RSS (日期筛选+中文RSS)
+    if len(filtered) < 3 and REQUESTS_AVAILABLE:
+        try:
+            import urllib.parse
+            cutoff_date = datetime.now() - timedelta(days=7)  # 只取7天内的新闻
+            seen_titles = set()
+            
+            for kw in keywords[:5]:  # 扩展到5个关键词
+                # 用中文 RSS 获得更新、更相关的结果
+                encoded_kw = urllib.parse.quote(kw)
+                rss_urls = [
+                    f"https://news.google.com/rss/search?q={encoded_kw}+股票&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+                    f"https://news.google.com/rss/search?q={encoded_kw}&hl=en-US&gl=US&ceid=US:en",
+                ]
+                
+                for rss_url in rss_urls:
+                    resp = requests.get(rss_url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
+                    if resp.status_code != 200:
+                        continue
+                    
+                    import xml.etree.ElementTree as ET
+                    try:
+                        root = ET.fromstring(resp.text)
+                        items = root.findall('.//item')[:10]  # 多取一些做日期筛选
+                    except ET.ParseError:
+                        continue
+                    
+                    for item in items:
+                        title_el = item.find('title')
+                        link_el = item.find('link')
+                        pub_date_el = item.find('pubDate')
+                        
+                        if title_el is None or not title_el.text:
+                            continue
+                        
+                        title_text = title_el.text.strip()
+                        if not title_text or len(title_text) < 10:
+                            continue
+                        
+                        # 日期筛选 - 检查是否在7天内
+                        if pub_date_el is not None and pub_date_el.text:
+                            try:
+                                # RFC 2822 日期解析
+                                from email.utils import parsedate_to_datetime
+                                pub_dt = parsedate_to_datetime(pub_date_el.text)
+                                if pub_dt.tzinfo:
+                                    pub_dt = pub_dt.replace(tzinfo=None)
+                                if pub_dt < cutoff_date:
+                                    continue
+                            except Exception:
+                                pass  # 无法解析日期时不过滤
+                        
+                        # 去重
+                        title_key = title_text[:60].lower()
+                        if title_key in seen_titles:
+                            continue
+                        seen_titles.add(title_key)
+                        
+                        link_text = link_el.text if link_el is not None else ''
+                        pub_text = pub_date_el.text[:16] if pub_date_el is not None else ''
+                        
+                        news_item = {
+                            'title': title_text,
+                            'ai_summary': '',
+                            'source': 'Google News',
+                            'source_class': 'search',
+                            'sentiment': '中性',
+                            'sentiment_class': 'neutral',
+                            'is_social': False,
+                            'industries': [],
+                            'stocks': [],
+                            'url': link_text,
+                            'time_display': pub_text or '近期'
+                        }
+                        
+                        # AI 分析 (带缓存)
+                        cached = get_cached_analysis(title_text)
+                        if cached:
+                            if 'summary' in cached and 'ai_summary' not in cached:
+                                cached['ai_summary'] = cached.pop('summary')
+                            news_item.update(cached)
+                        else:
+                            analysis = analyze_news(title_text)
+                            if analysis:
+                                if 'summary' in analysis and 'ai_summary' not in analysis:
+                                    analysis['ai_summary'] = analysis.pop('summary')
+                                news_item.update(analysis)
+                                set_cached_analysis(title_text, analysis)
+                        
+                        filtered.append(news_item)
+                        
+                        # 收集到3条就够了
+                        if len(filtered) >= 3:
+                            break
+                    
+                    if len(filtered) >= 3:
+                        break
+        
+        except Exception as e:
+            print(f"Search error: {e}")
+    
+    return filtered
+
+@app.route('/', methods=['GET', 'POST'])
 def index():
+    """Main page - supports GET and POST"""
     lang = request.args.get("lang", "zh")
     if lang not in ["zh", "en"]:
         lang = "zh"
     other_lang = "en" if lang == "zh" else "zh"
     
+    # Get filter parameters from POST body
+    filters = {}
+    if request.method == 'POST':
+        try:
+            filters = request.get_json(silent=True) or {}
+        except:
+            filters = {}
+    
+    # Get news
     news_list = get_cached_news()
     
-    # Translate news (English->Chinese for Reddit, Chinese->English for EN page)
+    # Apply filters if provided - use the shared filter function
+    if filters and any(filters.get(k) for k in ['field', 'ticker', 'company']):
+        news_list = filter_news_by_keywords(news_list, filters)
+    
+    # Translate news
     news_list = [translate_news_item(n, lang) for n in news_list]
     
     finance_news = [n for n in news_list if not n.get("is_social")]
@@ -1131,9 +1358,38 @@ def index():
                                   view_hot=get_text("view_hot", lang),
                                   loading=get_text("loading", lang),
                                   hot_search=get_text("hot_search", lang))
-@app.route('/api/news')
+
+@app.route('/api/news', methods=['GET', 'POST'])
+@rate_limit(max_requests=30, period=60)
 def api_news():
-    return jsonify({'success': True, 'count': len(get_cached_news()), 'data': get_cached_news()})
+    secret = (request.args.get('api_secret', '') or 
+              request.headers.get('API_SECRET', '') or 
+              request.headers.get('Api-Secret', ''))
+    if not secret or secret != API_SECRET:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    filters = {}
+    if request.method == 'POST':
+        try:
+            raw = request.get_json(silent=True) or {}
+            for k in ['field', 'ticker', 'company']:
+                if k in raw:
+                    if not isinstance(raw[k], list):
+                        filters[k] = []
+                    else:
+                        filters[k] = [str(x)[:100] for x in raw[k] if isinstance(x, str)][:20]
+                else:
+                    filters[k] = []
+        except:
+            filters = {}
+    
+    news_list = get_cached_news()
+    
+    # Apply filters if provided
+    if filters and any(filters.get(k) for k in ['field', 'ticker', 'company']):
+        news_list = filter_news_by_keywords(news_list, filters)
+    
+    return jsonify({'success': True, 'count': len(news_list), 'data': news_list, 'filters': filters})
 
 
 @app.route('/api/cache/stats')
@@ -1150,10 +1406,8 @@ def cache_stats():
 def health():
     global _last_auto_refresh
     return jsonify({
-        'status': 'ok', 
-        'deepseek_configured': bool(DEEPSEEK_API_KEY),
-        'auto_refresh_interval_hours': AUTO_REFRESH_INTERVAL_HOURS,
-        'last_auto_refresh': _last_auto_refresh.isoformat() if _last_auto_refresh else None
+        'status': 'ok',
+        'version': 'v6.0'
     })
 
 
